@@ -152,17 +152,83 @@ function toast(msg, { action, onAction } = {}) {
   toastTimer = setTimeout(() => el.classList.remove('show'), action ? 5000 : 2600);
 }
 
+// ---------- Back button for panels ----------
+// While any panel (sheet or Cook mode) is open there is one extra history entry, so the
+// phone's back button closes the top panel instead of changing the page underneath.
+// When the last panel closes from the UI, that entry is removed; a panel opened right
+// away (e.g. a menu item that opens another sheet) reuses it. Navigation requested in
+// the meantime waits until the history is settled.
+const overlayClosers = [];
+let overlayEntry = false;
+let removeTimer = null;
+let popsPending = 0;
+const afterPops = [];
+
+function settleHistory() {
+  popsPending = 0;
+  afterPops.splice(0).forEach((f) => f());
+}
+
+function pushOverlay(closer) {
+  overlayClosers.push(closer);
+  if (removeTimer) {
+    clearTimeout(removeTimer);
+    removeTimer = null;
+    settleHistory();
+    return;
+  }
+  if (!overlayEntry) {
+    history.pushState({ forkfulOverlay: true }, '');
+    overlayEntry = true;
+  }
+}
+
+function dropOverlay(closer) {
+  const i = overlayClosers.lastIndexOf(closer);
+  if (i < 0) return;
+  overlayClosers.splice(i, 1);
+  if (overlayClosers.length || !overlayEntry) return;
+  popsPending = 1;
+  removeTimer = setTimeout(() => {
+    removeTimer = null;
+    overlayEntry = false;
+    history.back();
+    // Safety net: if the browser drops the back step, don't hold navigation forever.
+    setTimeout(() => { if (popsPending) settleHistory(); }, 700);
+  }, 0);
+}
+
+function whenHistorySettled(fn) {
+  if (popsPending) afterPops.push(fn);
+  else fn();
+}
+
+window.addEventListener('popstate', () => {
+  if (popsPending && !removeTimer) {
+    settleHistory();
+    return;
+  }
+  if (!overlayEntry) return; // ordinary page back/forward
+  overlayEntry = false;
+  overlayClosers.pop()?.(true);
+  if (overlayClosers.length) {
+    history.pushState({ forkfulOverlay: true }, '');
+    overlayEntry = true;
+  }
+});
+
 function openSheet(html, { onClose, className = '' } = {}) {
   const el = document.createElement('div');
   el.className = 'sheet-backdrop';
-  el.innerHTML = `<div class="sheet ${className}" role="dialog" aria-modal="true"><div class="grabber"></div><div class="sheet-content">${html}</div></div>`;
+  el.innerHTML = `<div class="sheet ${className}" role="dialog" aria-modal="true"><div class="grabber"></div><button type="button" class="sheet-x" data-close aria-label="Close">${icon('x')}</button><div class="sheet-content">${html}</div></div>`;
   document.body.append(el);
   document.body.classList.add('noscroll');
   requestAnimationFrame(() => el.classList.add('open'));
   let closed = false;
-  const close = () => {
+  const close = (fromHistory = false) => {
     if (closed) return;
     closed = true;
+    if (!fromHistory) dropOverlay(close);
     el.classList.remove('open');
     setTimeout(() => {
       el.remove();
@@ -176,8 +242,9 @@ function openSheet(html, { onClose, className = '' } = {}) {
   el.addEventListener('click', (e) => {
     if (e.target === el || e.target.closest('[data-close]')) close();
   });
+  pushOverlay(close);
   const content = el.querySelector('.sheet-content');
-  return { el: content, close, set: (h) => { content.innerHTML = h; } };
+  return { el: content, close: () => close(), set: (h) => { content.innerHTML = h; } };
 }
 
 function confirmSheet(title, message, { confirm = 'Delete', danger = true } = {}) {
@@ -277,8 +344,14 @@ function updateNav(name) {
 }
 
 function go(hash) {
-  if (location.hash === hash) render();
-  else location.hash = hash;
+  whenHistorySettled(() => {
+    if (location.hash === hash) render();
+    else location.hash = hash;
+  });
+}
+
+function replaceRoute(hash) {
+  whenHistorySettled(() => location.replace(hash));
 }
 
 window.addEventListener('hashchange', () => {
@@ -400,7 +473,9 @@ const VIEWS = {
 
   discover() {
     const q = ui.discoverSearch;
-    let list = SAMPLE_RECIPES.filter((r) => ui.discoverCat === 'all' || r.categories.includes(ui.discoverCat));
+    const inCategory = (r) => ui.discoverCat === 'all'
+      || (ui.discoverCat === 'quick' ? totalTime(r) > 0 && totalTime(r) <= 30 : r.categories.includes(ui.discoverCat));
+    let list = SAMPLE_RECIPES.filter(inCategory);
     list = filterRecipes(list, q);
     const featured = !q && ui.discoverCat === 'all' ? SAMPLE_RECIPES[new Date().getDate() % SAMPLE_RECIPES.length] : null;
     return `
@@ -528,6 +603,8 @@ const VIEWS = {
         <div class="setting"><div><strong>Appearance</strong></div></div>
         ${seg('theme', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']])}
         <div class="setting"><div><strong>Keep screen on in Cook Mode</strong><small>So your phone doesn't lock mid-recipe</small></div>${toggle('wakeLock')}</div>
+        <label class="field server-field"><span>Your import server <small>optional · makes Instagram & Facebook imports more reliable</small></span>
+          <input id="importServer" type="url" inputmode="url" data-change="import-server" placeholder="https://forkful-import.yourname.workers.dev" value="${esc(s.importServer || '')}"></label>
         <div class="setting"><div><strong>Import helper</strong><small>Uses a public relay to read sites that block direct access. The relay sees the link you import, nothing else.</small></div>${toggle('useProxy')}</div>
       </section>
       <section class="settings">
@@ -727,14 +804,25 @@ function importSheet(mode = 'menu', prefill = {}) {
   const menu = () => {
     s.set(`
       <h2 class="sheet-title">Add a recipe</h2>
+      ${navigator.clipboard?.readText ? `<button class="btn primary full paste-smart" id="smartPaste">${icon('sparkle')} Paste what you copied</button>
+      <p class="muted small center paste-hint">Works with a copied link or a copied caption.</p>` : ''}
       <div class="import-options">
         <button class="import-opt" data-mode="link"><span class="io-ic">${icon('link')}</span><span><strong>Paste a link</strong><small>TikTok, YouTube, Facebook, Instagram or any recipe site</small></span>${icon('fwd')}</button>
+        <button class="import-opt" data-mode="scan"><span class="io-ic">${icon('camera')}</span><span><strong>Scan a screenshot or photo</strong><small>Best for Instagram & Facebook: screenshot the caption</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="search"><span class="io-ic">${icon('search')}</span><span><strong>Find by dish name</strong><small>Search recipes with photos and pick the one that matches</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="text"><span class="io-ic">${icon('text')}</span><span><strong>Paste text</strong><small>A caption, a message from a friend, your notes</small></span>${icon('fwd')}</button>
-        <button class="import-opt" data-mode="scan"><span class="io-ic">${icon('camera')}</span><span><strong>Scan a photo</strong><small>Cookbook page, recipe card or screenshot</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="manual"><span class="io-ic">${icon('edit')}</span><span><strong>Write from scratch</strong><small>Type in your own creation</small></span>${icon('fwd')}</button>
       </div>`);
     s.el.querySelectorAll('.import-opt').forEach((b) => { b.onclick = () => show(b.dataset.mode); });
+    s.el.querySelector('#smartPaste')?.addEventListener('click', async () => {
+      let clip = '';
+      try { clip = (await navigator.clipboard.readText()).trim(); } catch { /* blocked */ }
+      if (!clip) { toast('Nothing to paste — copy a link or caption first'); return; }
+      const url = clip.match(/https?:\/\/\S+/)?.[0];
+      // A short text with a link is a shared link; a long text is a caption (even if it has a link in it).
+      if (url && clip.length < url.length + 120) link(url, true);
+      else text(clip);
+    });
   };
 
   const backBtn = `<button type="button" class="link-btn back-link" data-back>${icon('back')} Back</button>`;
@@ -770,19 +858,34 @@ function importSheet(mode = 'menu', prefill = {}) {
       btn.disabled = true;
       status.innerHTML = `<div class="loading"><span class="spinner"></span> Finding the recipe…</div>`;
       try {
-        const data = await importFromUrl(input.value, { useProxy: state.settings.useProxy !== false });
+        const data = await importFromUrl(input.value, { useProxy: state.settings.useProxy !== false, server: state.settings.importServer || '' });
         finishImport(data);
       } catch (err) {
         btn.disabled = false;
         const partial = err instanceof ImportError ? err.partial : {};
+        const social = ['instagram', 'facebook'].includes(partial.source?.platform);
+        const log = partial.log || [];
         status.innerHTML = `<div class="error">${esc(err.message || 'Import failed')}</div>
           <div class="stack">
-            <button type="button" class="btn primary full" id="toSearch">${icon('search')} Find a matching recipe</button>
-            <button type="button" class="btn soft full" id="toText">${icon('text')} Paste the caption instead</button>
+            ${partial.caption ? `<button type="button" class="btn primary full" id="toCaption">${icon('text')} Use the caption we found</button>` : ''}
+            ${social ? `<button type="button" class="btn ${partial.caption ? 'soft' : 'primary'} full" id="toScan">${icon('camera')} Scan a screenshot of the caption</button>
+            <p class="muted small">Take a screenshot of the post's caption (tap “more” first so the whole recipe shows), then pick it here.</p>` : ''}
+            <button type="button" class="btn ${social || partial.caption ? 'soft' : 'primary'} full" id="toSearch">${icon('search')} Find a matching recipe</button>
+            ${partial.caption ? '' : `<button type="button" class="btn soft full" id="toText">${icon('text')} Paste the caption instead</button>`}
+            ${log.length ? `<details class="import-log"><summary>Details</summary><ol>${log.map((l) => `<li>${esc(l)}</li>`).join('')}</ol>
+              <button type="button" class="btn ghost sm" id="copyLog">Copy details</button></details>` : ''}
           </div>`;
         btn.hidden = true;
-        s.el.querySelector('#toSearch').onclick = () => search(partial.query || partial.title || '', partial.source?.url || input.value);
-        s.el.querySelector('#toText').onclick = () => text(partial.caption || '', partial);
+        const origin = partial.source?.url || input.value;
+        const extra = { source: partial.source, image: partial.image || '' };
+        s.el.querySelector('#toSearch').onclick = () => search(partial.query || partial.title || '', origin);
+        s.el.querySelector('#toText')?.addEventListener('click', () => text('', extra));
+        s.el.querySelector('#toCaption')?.addEventListener('click', () => text(partial.caption, extra));
+        s.el.querySelector('#toScan')?.addEventListener('click', () => scan(null, extra));
+        s.el.querySelector('#copyLog')?.addEventListener('click', async () => {
+          const report = [`Link: ${origin}`, `Error: ${err.message}`, ...log.map((l, i) => `${i + 1}. ${l}`)].join('\n');
+          try { await navigator.clipboard.writeText(report); toast('Details copied'); } catch { toast('Couldn\'t copy — take a screenshot instead'); }
+        });
       }
     };
     input.oninput = () => { btn.hidden = false; };
@@ -880,13 +983,13 @@ function importSheet(mode = 'menu', prefill = {}) {
     setTimeout(() => ta.focus(), 250);
   };
 
-  const scan = () => {
+  const scan = (sharedFile = null, origin = {}) => {
     s.set(`${backBtn}
       <h2 class="sheet-title">Scan a recipe</h2>
-      <p class="muted">Snap a cookbook page, handwritten card or screenshot. Text is read on your device.</p>
+      <p class="muted">Pick a screenshot of a post's caption, or snap a cookbook page or recipe card. Text is read on your device.</p>
       <div class="stack">
-        <label class="btn primary full">${icon('camera')} Take photo<input type="file" accept="image/*" capture="environment" id="scanCam" hidden></label>
-        <label class="btn soft full">${icon('upload')} Choose from library<input type="file" accept="image/*" id="scanLib" hidden></label>
+        <label class="btn primary full">${icon('upload')} Choose a screenshot or photo<input type="file" accept="image/*" id="scanLib" hidden></label>
+        <label class="btn soft full">${icon('camera')} Take a photo<input type="file" accept="image/*" capture="environment" id="scanCam" hidden></label>
         <div id="scanStatus"></div>
       </div>`);
     bindBack();
@@ -906,8 +1009,12 @@ function importSheet(mode = 'menu', prefill = {}) {
           compressImage(file),
         ]);
         URL.revokeObjectURL(preview);
-        const parsed = parseInto(textOut, { image, source: { platform: 'photo', name: 'Scanned photo', url: '' } });
-        if (!parsed) throw new Error('No text found in that photo. Try a sharper, well-lit shot.');
+        const cleaned = P.cleanScreenshotText(textOut);
+        const parsed = parseInto(cleaned, {
+          image: origin.image || image,
+          source: origin.source?.url ? origin.source : { platform: 'photo', name: 'Scanned photo', url: '' },
+        });
+        if (!parsed) throw new Error('No text found in that picture. Try a sharper screenshot or photo.');
         if (!parsed.ingredients.length && !parsed.instructions.length) {
           s.close();
           ui.draft = { ...parsed, notes: textOut.trim() };
@@ -922,13 +1029,14 @@ function importSheet(mode = 'menu', prefill = {}) {
     };
     s.el.querySelector('#scanCam').onchange = (e) => handle(e.target.files[0]);
     s.el.querySelector('#scanLib').onchange = (e) => handle(e.target.files[0]);
+    if (sharedFile) handle(sharedFile);
   };
 
   const show = (m) => {
     if (m === 'link') link(prefill.url || '', !!prefill.autostart);
     else if (m === 'search') search(prefill.query || '');
     else if (m === 'text') text(prefill.text || '');
-    else if (m === 'scan') scan();
+    else if (m === 'scan') scan(prefill.file || null);
     else if (m === 'manual') { s.close(); ui.draft = null; go('#/edit/new'); }
     else menu();
   };
@@ -1084,6 +1192,7 @@ function openCook(recipe, factor) {
   document.body.append(el);
   document.body.classList.add('noscroll', 'cooking');
   cook = { recipe, steps, step: 0, factor, el, parsed: recipe.ingredients.map(P.parseIngredient), showIngs: false };
+  pushOverlay(closeCook);
   renderCook();
   requestWake();
   document.addEventListener('keydown', cookKeys);
@@ -1097,8 +1206,9 @@ function openCook(recipe, factor) {
   });
 }
 
-function closeCook() {
+function closeCook(fromHistory = false) {
   if (!cook) return;
+  if (fromHistory !== true) dropOverlay(closeCook);
   cook.el.remove();
   cook = null;
   document.body.classList.remove('noscroll', 'cooking');
@@ -1300,7 +1410,7 @@ function download(name, text) {
 const actions = {
   back(el) {
     if (navStack.length > 1) history.back();
-    else location.replace(el.dataset.fallback || '#/recipes');
+    else replaceRoute(el.dataset.fallback || '#/recipes');
   },
   import() { importSheet(); },
   sort(el) { ui.sort = el.dataset.sort; render(); },
@@ -1387,7 +1497,7 @@ const actions = {
     const r = S.getRecipe(el.dataset.id);
     if (await confirmSheet('Delete recipe?', `"${r.title}" will be removed from your library and meal plan.`)) {
       S.deleteRecipe(r.id);
-      location.replace('#/recipes');
+      replaceRoute('#/recipes');
       toast('Recipe deleted');
     }
   },
@@ -1536,6 +1646,12 @@ document.addEventListener('change', async (e) => {
   if (!kind) return;
   if (kind === 'notes') S.updateRecipe(el.dataset.id, { notes: el.value });
   else if (kind === 'name') S.setSetting('name', el.value.trim());
+  else if (kind === 'import-server') {
+    const v = el.value.trim().replace(/\/+$/, '');
+    if (v && !/^https:\/\/[^\s/]+\.[^\s]+$/i.test(v)) { toast('That should be a link starting with https://'); return; }
+    S.setSetting('importServer', v);
+    toast(v ? 'Import server saved' : 'Import server removed');
+  }
   else if (kind === 'photo') {
     const file = el.files[0];
     if (!file) return;
@@ -1583,7 +1699,7 @@ document.addEventListener('submit', (e) => {
     if (!data.title) { toast('Give your recipe a title'); return; }
     const saved = S.saveRecipe(id ? data : { ...data, id: null });
     ui.draft = null;
-    location.replace(`#/recipe/${saved.id}`);
+    replaceRoute(`#/recipe/${saved.id}`);
     toast(id ? 'Changes saved' : 'Recipe saved 🎉');
   }
 });
@@ -1616,11 +1732,27 @@ S.subscribe((evt) => {
 
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme);
 
-function handleShareTarget() {
+async function takeSharedFromServiceWorker() {
+  try {
+    const cache = await caches.open('forkful-share');
+    const [imgRes, textRes] = await Promise.all([cache.match('shared-image'), cache.match('shared-text')]);
+    await Promise.all([cache.delete('shared-image'), cache.delete('shared-text')]);
+    const blob = imgRes ? await imgRes.blob() : null;
+    return { file: blob && blob.size ? new File([blob], 'shared-image', { type: blob.type || 'image/jpeg' }) : null, text: textRes ? await textRes.text() : '' };
+  } catch {
+    return { file: null, text: '' };
+  }
+}
+
+async function handleShareTarget() {
   const params = new URLSearchParams(location.search);
-  const shared = [params.get('url'), params.get('text'), params.get('title')].filter(Boolean).join(' ');
-  if (!shared) return;
+  let shared = [params.get('url'), params.get('text'), params.get('title')].filter(Boolean).join(' ');
+  let file = null;
+  if (params.has('shared')) ({ file, text: shared } = await takeSharedFromServiceWorker());
+  if (!shared && !file && !params.has('shared')) return;
   history.replaceState(null, '', location.pathname + location.hash);
+  if (file) { importSheet('scan', { file }); return; }
+  if (!shared) { toast('Nothing came through from that share — try again'); return; }
   const url = shared.match(/https?:\/\/\S+/)?.[0];
   if (url) importSheet('link', { url, autostart: true });
   else importSheet('text', { text: shared });
@@ -1640,7 +1772,7 @@ if (!state.settings.onboarded) {
         <h2>Welcome to Forkful</h2>
         <p>All your recipes in one place — saved from social media, websites, photos or your own head.</p>
         <ul class="welcome-list">
-          <li>${icon('link')}<span><strong>Import from anywhere</strong> Paste a TikTok, Reel, YouTube or blog link</span></li>
+          <li>${icon('link')}<span><strong>Import from anywhere</strong> Share a link or a screenshot of a post's caption to Forkful</span></li>
           <li>${icon('play')}<span><strong>Cook mode</strong> Step-by-step with built-in timers</span></li>
           <li>${icon('calendar')}<span><strong>Plan your week</strong> and get a grocery list sorted by aisle</span></li>
         </ul>

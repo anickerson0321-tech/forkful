@@ -8,20 +8,59 @@
   "orientation": "portrait",
   "background_color": "#fbf6f0",
   "theme_color": "#e8553a",
-  "categories": ["food", "lifestyle"],
+  "categories": [
+    "food",
+    "lifestyle"
+  ],
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
-    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
   ],
   "share_target": {
-    "action": "./",
-    "method": "GET",
-    "params": { "title": "title", "text": "text", "url": "url" }
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "image",
+          "accept": [
+            "image/*"
+          ]
+        }
+      ]
+    }
   },
   "shortcuts": [
-    { "name": "Grocery list", "url": "./#/groceries" },
-    { "name": "Meal plan", "url": "./#/plan" }
+    {
+      "name": "Grocery list",
+      "url": "./#/groceries"
+    },
+    {
+      "name": "Meal plan",
+      "url": "./#/plan"
+    }
   ]
 }

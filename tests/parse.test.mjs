@@ -5,6 +5,7 @@ import {
   parseRecipeText, extractRecipeFromHtml, categorize, addToGroceryList, groceryAmount, estimateNutrition,
   convertTemperatures, cleanSocialCaption, ingredientsInStep, normalizeName, platformFromUrl,
   recipeFromMealDb, guessDishFromUrl, textFromEmbedHtml, looksLikeLoginWall,
+  instagramShortcode, parseInstagramEmbed, describePage, cleanScreenshotText,
 } from '../js/parse.js';
 
 test('parses quantities, units, names and notes', () => {
@@ -237,6 +238,66 @@ test('reads post text from an embed page and spots login walls', () => {
   assert.equal(looksLikeLoginWall('<html><head><title>Log into Facebook</title></head><body>…</body></html>'), true);
   assert.equal(looksLikeLoginWall('<title>Facebook</title><meta property="og:description" content="Recipe…">'), false);
   assert.equal(looksLikeLoginWall('<title>Best Brownies</title>'), false);
+});
+
+test('reads the caption from Instagram embed pages', () => {
+  assert.equal(instagramShortcode('https://www.instagram.com/reel/DbO0aBcD123/?igsh=xyz'), 'DbO0aBcD123');
+  assert.equal(instagramShortcode('https://instagram.com/p/C1x2y3z4/'), 'C1x2y3z4');
+  assert.equal(instagramShortcode('https://www.instagram.com/chef.anna/reel/C9abcdEF/'), 'C9abcdEF');
+  assert.equal(instagramShortcode('https://www.instagram.com/chef.anna/'), null);
+
+  const html = `<div class="Embed"><div class="Caption"><a class="CaptionUsername" href="https://www.instagram.com/chef.anna/" target="_blank">chef.anna</a><br /><br />Creamy Tuscan Gnocchi 🍝 Save this!<br /><br />Ingredients:<br />- 1 lb gnocchi<br />- 1 cup heavy cream<br />- 2 cloves garlic<br /><br />Method:<br />1. Boil the gnocchi for 3 minutes.<br />2. Stir in the cream and garlic.<br />#gnocchi #dinner<div class="CaptionComments"><a href="#">View all 120 comments</a></div></div></div>
+    <img class="EmbeddedMediaImage" alt="x" src="https://scontent.cdninstagram.com/v/t51/abc.jpg?a=1&amp;b=2">`;
+  const ig = parseInstagramEmbed(html);
+  assert.equal(ig.author, 'chef.anna');
+  assert.equal(ig.image, 'https://scontent.cdninstagram.com/v/t51/abc.jpg?a=1&b=2');
+  const r = parseRecipeText(ig.caption);
+  assert.equal(r.title, 'Creamy Tuscan Gnocchi');
+  assert.deepEqual(r.ingredients, ['1 lb gnocchi', '1 cup heavy cream', '2 cloves garlic']);
+  assert.equal(r.instructions.length, 2);
+  assert.doesNotMatch(ig.caption, /View all|chef\.anna/);
+
+  // Caption only in the (double-escaped) JSON blob.
+  const inner = JSON.stringify({ shortcode_media: { owner: { username: 'pasta.queen' }, edge_media_to_caption: { edges: [{ node: { text: 'Lemon Orzo\nIngredients:\n1 cup orzo\n1 lemon' } }] } } });
+  const json = `<script>window.__additionalDataLoaded('extra',{"contextJSON":${JSON.stringify(inner)}});</script>`;
+  const ig2 = parseInstagramEmbed(json);
+  assert.equal(ig2.caption, 'Lemon Orzo\nIngredients:\n1 cup orzo\n1 lemon');
+  assert.equal(ig2.author, 'pasta.queen');
+  assert.equal(parseInstagramEmbed('<html><title>Instagram</title></html>').caption, '');
+});
+
+test('cleans social-app clutter out of screenshot text', () => {
+  const ocr = `chef.anna • Follow
+Original audio
+Liked by sam and 2,301 others
+chef.anna Creamy Tuscan Gnocchi
+Ingredients:
+- 1 lb gnocchi
+- 1 cup heavy cream
+Method:
+1. Boil the gnocchi for 3 minutes.
+2. Stir in the cream... more
+View all 120 comments
+2d
+See translation`;
+  const cleaned = cleanScreenshotText(ocr);
+  assert.doesNotMatch(cleaned, /Follow|Liked by|View all|See translation|Original audio|^2d$/m);
+  const r = parseRecipeText(cleaned);
+  assert.equal(r.title, 'Creamy Tuscan Gnocchi');
+  assert.deepEqual(r.ingredients, ['1 lb gnocchi', '1 cup heavy cream']);
+  assert.deepEqual(r.instructions, ['Boil the gnocchi for 3 minutes.', 'Stir in the cream']);
+  // Handle prefix stripped even without a "• Follow" line; ordinary words are kept.
+  assert.equal(cleanScreenshotText('the_lazy.cook Easy Banana Bread'), 'Easy Banana Bread');
+  assert.equal(cleanScreenshotText('Grandma Easy Banana Bread'), 'Grandma Easy Banana Bread');
+  assert.equal(cleanScreenshotText('2 cups flour'), '2 cups flour');
+});
+
+test('summarizes fetched pages for the Details view', () => {
+  const d = describePage(`<title>Log into Facebook</title>${'x'.repeat(3000)}`);
+  assert.match(d, /title "Log into Facebook"/);
+  assert.match(d, /no preview text/);
+  assert.match(d, /login page/);
+  assert.match(describePage('<title>Post</title><meta property="og:description" content="Best chili &amp; cornbread">'), /preview text "Best chili & cornbread"/);
 });
 
 function pick(p) {

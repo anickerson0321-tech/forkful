@@ -20,7 +20,7 @@ function defaults() {
     cookbooks: STARTER_COOKBOOKS.map(({ sampleIds, ...c }) => c),
     plan: {},
     groceries: [],
-    settings: { name: '', units: 'original', theme: 'system', wakeLock: true, useProxy: true, onboarded: false, groceryGroup: 'aisle' },
+    settings: { name: '', units: 'original', theme: 'system', wakeLock: true, useProxy: true, importServer: '', onboarded: false, groceryGroup: 'aisle' },
   };
 }
 
