@@ -152,17 +152,83 @@ function toast(msg, { action, onAction } = {}) {
   toastTimer = setTimeout(() => el.classList.remove('show'), action ? 5000 : 2600);
 }
 
+// ---------- Back button for panels ----------
+// While any panel (sheet or Cook mode) is open there is one extra history entry, so the
+// phone's back button closes the top panel instead of changing the page underneath.
+// When the last panel closes from the UI, that entry is removed; a panel opened right
+// away (e.g. a menu item that opens another sheet) reuses it. Navigation requested in
+// the meantime waits until the history is settled.
+const overlayClosers = [];
+let overlayEntry = false;
+let removeTimer = null;
+let popsPending = 0;
+const afterPops = [];
+
+function settleHistory() {
+  popsPending = 0;
+  afterPops.splice(0).forEach((f) => f());
+}
+
+function pushOverlay(closer) {
+  overlayClosers.push(closer);
+  if (removeTimer) {
+    clearTimeout(removeTimer);
+    removeTimer = null;
+    settleHistory();
+    return;
+  }
+  if (!overlayEntry) {
+    history.pushState({ forkfulOverlay: true }, '');
+    overlayEntry = true;
+  }
+}
+
+function dropOverlay(closer) {
+  const i = overlayClosers.lastIndexOf(closer);
+  if (i < 0) return;
+  overlayClosers.splice(i, 1);
+  if (overlayClosers.length || !overlayEntry) return;
+  popsPending = 1;
+  removeTimer = setTimeout(() => {
+    removeTimer = null;
+    overlayEntry = false;
+    history.back();
+    // Safety net: if the browser drops the back step, don't hold navigation forever.
+    setTimeout(() => { if (popsPending) settleHistory(); }, 700);
+  }, 0);
+}
+
+function whenHistorySettled(fn) {
+  if (popsPending) afterPops.push(fn);
+  else fn();
+}
+
+window.addEventListener('popstate', () => {
+  if (popsPending && !removeTimer) {
+    settleHistory();
+    return;
+  }
+  if (!overlayEntry) return; // ordinary page back/forward
+  overlayEntry = false;
+  overlayClosers.pop()?.(true);
+  if (overlayClosers.length) {
+    history.pushState({ forkfulOverlay: true }, '');
+    overlayEntry = true;
+  }
+});
+
 function openSheet(html, { onClose, className = '' } = {}) {
   const el = document.createElement('div');
   el.className = 'sheet-backdrop';
-  el.innerHTML = `<div class="sheet ${className}" role="dialog" aria-modal="true"><div class="grabber"></div><div class="sheet-content">${html}</div></div>`;
+  el.innerHTML = `<div class="sheet ${className}" role="dialog" aria-modal="true"><div class="grabber"></div><button type="button" class="sheet-x" data-close aria-label="Close">${icon('x')}</button><div class="sheet-content">${html}</div></div>`;
   document.body.append(el);
   document.body.classList.add('noscroll');
   requestAnimationFrame(() => el.classList.add('open'));
   let closed = false;
-  const close = () => {
+  const close = (fromHistory = false) => {
     if (closed) return;
     closed = true;
+    if (!fromHistory) dropOverlay(close);
     el.classList.remove('open');
     setTimeout(() => {
       el.remove();
@@ -176,8 +242,9 @@ function openSheet(html, { onClose, className = '' } = {}) {
   el.addEventListener('click', (e) => {
     if (e.target === el || e.target.closest('[data-close]')) close();
   });
+  pushOverlay(close);
   const content = el.querySelector('.sheet-content');
-  return { el: content, close, set: (h) => { content.innerHTML = h; } };
+  return { el: content, close: () => close(), set: (h) => { content.innerHTML = h; } };
 }
 
 function confirmSheet(title, message, { confirm = 'Delete', danger = true } = {}) {
@@ -277,8 +344,14 @@ function updateNav(name) {
 }
 
 function go(hash) {
-  if (location.hash === hash) render();
-  else location.hash = hash;
+  whenHistorySettled(() => {
+    if (location.hash === hash) render();
+    else location.hash = hash;
+  });
+}
+
+function replaceRoute(hash) {
+  whenHistorySettled(() => location.replace(hash));
 }
 
 window.addEventListener('hashchange', () => {
@@ -400,7 +473,9 @@ const VIEWS = {
 
   discover() {
     const q = ui.discoverSearch;
-    let list = SAMPLE_RECIPES.filter((r) => ui.discoverCat === 'all' || r.categories.includes(ui.discoverCat));
+    const inCategory = (r) => ui.discoverCat === 'all'
+      || (ui.discoverCat === 'quick' ? totalTime(r) > 0 && totalTime(r) <= 30 : r.categories.includes(ui.discoverCat));
+    let list = SAMPLE_RECIPES.filter(inCategory);
     list = filterRecipes(list, q);
     const featured = !q && ui.discoverCat === 'all' ? SAMPLE_RECIPES[new Date().getDate() % SAMPLE_RECIPES.length] : null;
     return `
@@ -1117,6 +1192,7 @@ function openCook(recipe, factor) {
   document.body.append(el);
   document.body.classList.add('noscroll', 'cooking');
   cook = { recipe, steps, step: 0, factor, el, parsed: recipe.ingredients.map(P.parseIngredient), showIngs: false };
+  pushOverlay(closeCook);
   renderCook();
   requestWake();
   document.addEventListener('keydown', cookKeys);
@@ -1130,8 +1206,9 @@ function openCook(recipe, factor) {
   });
 }
 
-function closeCook() {
+function closeCook(fromHistory = false) {
   if (!cook) return;
+  if (fromHistory !== true) dropOverlay(closeCook);
   cook.el.remove();
   cook = null;
   document.body.classList.remove('noscroll', 'cooking');
@@ -1333,7 +1410,7 @@ function download(name, text) {
 const actions = {
   back(el) {
     if (navStack.length > 1) history.back();
-    else location.replace(el.dataset.fallback || '#/recipes');
+    else replaceRoute(el.dataset.fallback || '#/recipes');
   },
   import() { importSheet(); },
   sort(el) { ui.sort = el.dataset.sort; render(); },
@@ -1420,7 +1497,7 @@ const actions = {
     const r = S.getRecipe(el.dataset.id);
     if (await confirmSheet('Delete recipe?', `"${r.title}" will be removed from your library and meal plan.`)) {
       S.deleteRecipe(r.id);
-      location.replace('#/recipes');
+      replaceRoute('#/recipes');
       toast('Recipe deleted');
     }
   },
@@ -1622,7 +1699,7 @@ document.addEventListener('submit', (e) => {
     if (!data.title) { toast('Give your recipe a title'); return; }
     const saved = S.saveRecipe(id ? data : { ...data, id: null });
     ui.draft = null;
-    location.replace(`#/recipe/${saved.id}`);
+    replaceRoute(`#/recipe/${saved.id}`);
     toast(id ? 'Changes saved' : 'Recipe saved 🎉');
   }
 });

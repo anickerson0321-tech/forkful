@@ -23,7 +23,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-garlic-pasta', title: 'One-Pot Garlic Butter Pasta', emoji: '🍝', servings: 2, prepTime: 5, cookTime: 15,
     description: 'Everything cooks in one pot, so the starchy pasta water turns into a silky garlic butter sauce.',
-    categories: ['dinner', 'quick', 'vegetarian'], tags: ['pasta', 'vegetarian', '20-minute'], source: kitchen,
+    categories: ['dinner', 'vegetarian'], tags: ['pasta', 'vegetarian', '20-minute'], source: kitchen,
     ingredients: [
       '200 g spaghetti', '3 tbsp butter', '5 cloves garlic, thinly sliced', '1/4 tsp red pepper flakes', '2 1/2 cups water',
       '1/2 tsp salt', '1/3 cup parmesan, grated', '1 lemon (zest and juice)', '2 tbsp parsley, chopped',
@@ -38,7 +38,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-smashed-potatoes', title: 'Crispy Smashed Potatoes', emoji: '🥔', servings: 4, prepTime: 10, cookTime: 45,
     description: 'Boiled baby potatoes smashed flat and roasted until shatteringly crisp. Viral for a reason.',
-    categories: ['quick', 'vegetarian', 'popular'], tags: ['side', 'vegetarian', 'gluten-free'], source: kitchen,
+    categories: ['vegetarian', 'popular'], tags: ['side', 'vegetarian', 'gluten-free'], source: kitchen,
     ingredients: [
       '1 kg baby potatoes', '1 tbsp salt', '4 tbsp olive oil', '3 cloves garlic, minced', '1 tsp smoked paprika',
       '1/2 cup parmesan, grated', '2 tbsp chives, chopped', '1/2 cup sour cream, to serve',
@@ -72,7 +72,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-peanut-noodles', title: 'Spicy Peanut Noodles', emoji: '🥜', servings: 2, prepTime: 10, cookTime: 10,
     description: 'Slurpable noodles in a creamy, spicy peanut-sesame sauce with crunchy veg.',
-    categories: ['dinner', 'quick', 'vegetarian'], tags: ['noodles', 'asian', 'vegan'], source: kitchen,
+    categories: ['dinner', 'vegetarian'], tags: ['noodles', 'asian', 'vegan'], source: kitchen,
     ingredients: [
       '200 g noodles', '3 tbsp peanut butter', '2 tbsp soy sauce', '1 tbsp maple syrup', '1 tbsp rice vinegar',
       '1 tsp sesame oil', '1 tbsp sriracha', '1 clove garlic, grated', '1 tsp ginger, grated', '1/4 cup hot water',
@@ -88,7 +88,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-sheet-pan-salmon', title: 'Sheet-Pan Honey Garlic Salmon', emoji: '🐟', servings: 4, prepTime: 10, cookTime: 20,
     description: 'Sticky honey-garlic salmon and roasted broccoli on one tray. Minimal washing up.',
-    categories: ['dinner', 'quick', 'popular'], tags: ['seafood', 'healthy', 'sheet-pan'], source: kitchen,
+    categories: ['dinner', 'popular'], tags: ['seafood', 'healthy', 'sheet-pan'], source: kitchen,
     ingredients: [
       '4 salmon fillets', '1 head broccoli, cut into florets', '2 tbsp olive oil', '1/2 tsp salt', '3 tbsp honey',
       '3 tbsp soy sauce', '3 cloves garlic, minced', '1 tbsp lemon juice', '1 tsp sesame seeds',
@@ -105,7 +105,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-overnight-oats', title: 'Blueberry Overnight Oats', emoji: '🥣', servings: 1, prepTime: 5, cookTime: 0,
     description: 'Five minutes the night before for a creamy, grab-and-go breakfast.',
-    categories: ['breakfast', 'quick', 'vegetarian'], tags: ['breakfast', 'meal-prep', 'no-cook'], source: kitchen,
+    categories: ['breakfast', 'vegetarian'], tags: ['breakfast', 'meal-prep', 'no-cook'], source: kitchen,
     ingredients: [
       '1/2 cup oats', '1/2 cup milk', '1/4 cup greek yogurt', '1 tbsp chia seeds', '1 tbsp maple syrup',
       '1/4 tsp vanilla extract', '1/2 cup blueberries',
@@ -153,7 +153,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-greek-salad', title: 'Big Greek Salad', emoji: '🥗', servings: 4, prepTime: 15, cookTime: 0,
     description: 'Crunchy, juicy and salty with a punchy oregano vinaigrette. No lettuce required.',
-    categories: ['quick', 'vegetarian'], tags: ['salad', 'vegetarian', 'no-cook'], source: kitchen,
+    categories: ['vegetarian'], tags: ['salad', 'vegetarian', 'no-cook'], source: kitchen,
     ingredients: [
       '4 tomatoes, cut into wedges', '1 cucumber, sliced', '1 red onion, thinly sliced', '1 bell pepper, sliced',
       '1/2 cup olives', '200 g feta', '1/4 cup olive oil', '2 tbsp red wine vinegar', '1 tsp dried oregano', '1/2 tsp salt',
@@ -184,7 +184,7 @@ export const SAMPLE_RECIPES = [
   {
     id: 's-beef-tacos', title: 'Weeknight Beef Tacos', emoji: '🌮', servings: 4, prepTime: 10, cookTime: 15,
     description: 'Juicy spiced beef in warm tortillas with all the toppings. Taco Tuesday sorted.',
-    categories: ['dinner', 'quick', 'popular'], tags: ['mexican', 'beef', 'family'], source: kitchen,
+    categories: ['dinner', 'popular'], tags: ['mexican', 'beef', 'family'], source: kitchen,
     ingredients: [
       '1 lb ground beef', '1 onion, diced', '2 cloves garlic, minced', '1 tbsp chili powder', '1 tsp cumin',
       '1 tsp smoked paprika', '1/2 tsp salt', '1/3 cup tomato sauce', '8 tortillas', '1 cup cheddar, shredded',

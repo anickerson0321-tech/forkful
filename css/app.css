@@ -473,6 +473,10 @@ section { margin-bottom: 22px; }
   .sheet { border-radius: 26px; transform: translateY(30px) scale(0.98); opacity: 0; transition: transform 0.22s ease, opacity 0.22s ease; }
   .sheet-backdrop.open .sheet { opacity: 1; }
 }
+.sheet { position: relative; }
+.sheet-x { position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); z-index: 1; }
+.sheet-x .ic { width: 17px; height: 17px; }
+.sheet-title { padding-right: 40px; }
 .grabber { width: 40px; height: 5px; border-radius: 99px; background: var(--line); margin: 2px auto 14px; }
 .sheet-title { font-size: 22px; font-weight: 800; margin-bottom: 14px; }
 .sheet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 18px; }
