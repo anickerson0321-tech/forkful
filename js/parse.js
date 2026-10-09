@@ -1022,3 +1022,85 @@ export function looksLikeLoginWall(html) {
   const title = stripTags(String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').toLowerCase();
   return /^(log in|log into|login|sign up|facebook|instagram)\b/.test(title) && !/og:description/i.test(html);
 }
+
+// ---------- Instagram ----------
+
+export function instagramShortcode(url) {
+  return String(url).match(/instagram\.com\/(?:[\w.]+\/)?(?:p|reels?|tv)\/([A-Za-z0-9_-]{5,})/)?.[1] || null;
+}
+
+// Undo one level of JSON string escaping (\" \n é …) without throwing.
+function unescapeJsonString(s) {
+  try { return JSON.parse(`"${s}"`); } catch { return s.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'); }
+}
+
+// Instagram's public embed page (/p/<code>/embed/captioned/) carries the full caption
+// without a login: in a <div class="Caption"> block and/or a JSON blob.
+export function parseInstagramEmbed(html) {
+  const h = String(html);
+  let caption = '';
+  let author = '';
+  const block = h.match(/<div[^>]+class="[^"]*\bCaption\b[^"]*"[^>]*>([\s\S]*?)(?:<div[^>]+class="[^"]*CaptionComments|<\/div>\s*<\/div>|$)/i);
+  if (block) {
+    author = stripTags(block[1].match(/<a[^>]+class="[^"]*CaptionUsername[^"]*"[^>]*>([\s\S]*?)<\/a>/i)?.[1] || '');
+    const body = block[1].replace(/<a[^>]+class="[^"]*CaptionUsername[^"]*"[^>]*>[\s\S]*?<\/a>/i, '');
+    caption = stripTags(body.replace(/<br\s*\/?>/gi, '\n')).replace(/\n{3,}/g, '\n\n').trim();
+  }
+  // JSON shapes seen in embed pages, possibly escaped a second time inside a string.
+  const sources = [h, unescapeJsonString(h.match(/"contextJSON"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1] || '')];
+  if (!caption) {
+    for (const src of sources) {
+      const m = src.match(/"edge_media_to_caption"\s*:\s*\{\s*"edges"\s*:\s*\[\s*\{\s*"node"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+        || src.match(/"caption"\s*:\s*\{[^{}]*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (m) { caption = unescapeJsonString(m[1]).trim(); break; }
+    }
+  }
+  for (const src of sources) {
+    if (author) break;
+    author = src.match(/"owner"\s*:\s*\{[^{}]*?"username"\s*:\s*"([\w.]+)"/)?.[1] || '';
+  }
+  const img = h.match(/<img[^>]+class="[^"]*EmbeddedMediaImage[^"]*"[^>]+src="([^"]+)"/i)?.[1]
+    || h.match(/<img[^>]+src="([^"]+)"[^>]+class="[^"]*EmbeddedMediaImage/i)?.[1]
+    || h.match(/"display_url"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+  return { caption, author, image: img ? decodeEntities(unescapeJsonString(img)) : '' };
+}
+
+// One-line summary of a fetched page, for the import "Details" view.
+export function describePage(html) {
+  const h = String(html);
+  const title = stripTags(h.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').slice(0, 60);
+  const og = (() => {
+    const tag = h.match(/<meta[^>]+(?:property|name)=["']og:description["'][^>]*>/i)?.[0];
+    const c = tag?.match(/content=(["'])([\s\S]*?)\1/i)?.[2];
+    return c ? decodeEntities(c).slice(0, 80) : '';
+  })();
+  const parts = [`${Math.round(h.length / 1024)} KB`];
+  if (title) parts.push(`title "${title}"`);
+  parts.push(og ? `preview text "${og}${og.length >= 80 ? '…' : ''}"` : 'no preview text');
+  if (looksLikeLoginWall(h)) parts.push('looks like a login page');
+  return parts.join(', ');
+}
+
+// Removes social-app clutter that text recognition picks up from screenshots.
+const SCREENSHOT_NOISE = [
+  /^(liked by|view all|view \d+|add a comment|see translation|see more|see less|follow(ing)?|sponsored|suggested for you|reply|replies|send|share|like|comment|save|more|original audio|audio|reels?|paid partnership)\b/i,
+  /^\d+([.,]\d+)?[kKmM]?\s*(likes?|comments?|shares?|views?|plays?|reactions?)\b/i,
+  /^\d+\s*[smhdw]( ago)?$/i,
+  /^(\d+\s*(minutes?|hours?|days?|weeks?)\s*ago|yesterday|just now)$/i,
+  /^[@#]?[\w.]{2,30}\s*[•·]\s*(follow|following|original audio)/i,
+  /^\d{1,2}:\d{2}(\s*[ap]m)?$/i,
+];
+
+export function cleanScreenshotText(text) {
+  const lines = String(text ?? '').split('\n').map((l) => l.replace(/\s*[.…]{1,3}\s*more$/i, '').trim());
+  // Usernames seen on "name • Follow" lines; Instagram also prefixes the caption with the username.
+  const handles = new Set(lines.map((l) => l.match(/^@?([\w.]{2,30})\s*[•·]/)?.[1]).filter(Boolean));
+  const isHandle = (w) => handles.has(w.replace(/^@/, '')) || /^@?(?=[a-z0-9._]*[._\d])[a-z0-9._]{3,30}$/.test(w);
+  return lines
+    .filter((l) => l.length > 2 && !SCREENSHOT_NOISE.some((re) => re.test(l)) && /[a-z]{2}/i.test(l))
+    .map((l) => {
+      const [first, ...rest] = l.split(/\s+/);
+      return rest.length && isHandle(first) && /^[A-Z0-9"“(]/.test(rest[0]) ? rest.join(' ') : l;
+    })
+    .join('\n');
+}

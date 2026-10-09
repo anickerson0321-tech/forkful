@@ -537,6 +537,14 @@ section { margin-bottom: 22px; }
 .result small { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .web-fallback { display: grid; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 
+
+.paste-smart { margin-bottom: 4px; }
+.paste-hint { margin-bottom: 14px; }
+.import-log { font-size: 13px; color: var(--muted); background: var(--surface); border-radius: 12px; padding: 10px 12px; }
+.import-log summary { cursor: pointer; font-weight: 700; color: var(--ink-2); }
+.import-log ol { margin: 8px 0; padding-left: 18px; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.server-field input { font-size: 14px; }
+
 /* ---------- Toast ---------- */
 #toast {
   position: fixed; z-index: 80; left: 50%; top: calc(var(--safe-t) + 12px); transform: translate(-50%, -150%);
