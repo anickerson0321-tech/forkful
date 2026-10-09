@@ -26,15 +26,15 @@ Forkful is an installable web app (PWA) that copies ReciMe's core features. You 
 ```bash
 # from the repository root
 python3 -m http.server 8000
-# open http://localhost:8000/recime/
+# open http://localhost:8000/
 ```
 
-The app uses ES modules, so it has to be served over HTTP. Opening `index.html` straight from disk won't work. On `main`, the existing GitHub Pages workflow publishes it at `/<repo>/recime/`.
+The app uses ES modules, so it has to be served over HTTP. Opening `index.html` straight from disk won't work. Every push to `main` publishes it with GitHub Pages (`.github/workflows/pages.yml`) at `https://<user>.github.io/forkful/`.
 
 ## Tests
 
 ```bash
-node --test recime/tests/parse.test.mjs
+node --test tests/parse.test.mjs
 ```
 
 The tests cover ingredient parsing, scaling, unit and temperature conversion, durations and timers, caption parsing, schema.org extraction, aisle sorting, grocery merging and the nutrition estimate.
@@ -50,7 +50,7 @@ The tests cover ingredient parsing, scaling, unit and temperature conversion, du
 ## Code layout
 
 ```
-recime/
+forkful/
   index.html            app shell + tab bar
   css/app.css           styles (light/dark tokens)
   js/parse.js           pure parsing/formatting (ingredients, units, captions, schema.org, aisles, nutrition)
