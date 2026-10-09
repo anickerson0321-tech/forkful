@@ -964,3 +964,61 @@ export function ingredientsInStep(step, parsedIngredients) {
   });
   return hits;
 }
+
+// ---------- Recipe search & fallbacks ----------
+
+// Maps a TheMealDB result (free recipe search API) to our recipe shape.
+export function recipeFromMealDb(meal) {
+  const ingredients = [];
+  for (let i = 1; i <= 20; i++) {
+    const name = (meal[`strIngredient${i}`] || '').trim();
+    if (!name) continue;
+    const measure = (meal[`strMeasure${i}`] || '').trim();
+    ingredients.push(measure ? `${measure} ${name}` : name);
+  }
+  const lines = String(meal.strInstructions || '').split(/\r?\n/).map((l) => l.trim())
+    .filter((l) => l && !/^(step\s*\d+|\d+\.?)$/i.test(l));
+  const instructions = lines.flatMap((l) => (l.length > 260 ? splitSentences(l) : [cleanListLine(l) || l]));
+  const tags = [meal.strCategory, meal.strArea, ...String(meal.strTags || '').split(',')]
+    .map((t) => String(t || '').trim().toLowerCase()).filter((t, i, a) => t && a.indexOf(t) === i).slice(0, 6);
+  return {
+    title: String(meal.strMeal || '').trim(),
+    description: [meal.strArea, meal.strCategory].filter(Boolean).join(' · '),
+    image: meal.strMealThumb || '',
+    servings: null,
+    prepTime: null,
+    cookTime: null,
+    ingredients,
+    instructions,
+    tags,
+    source: { url: meal.strSource || `https://www.themealdb.com/meal/${meal.idMeal}`, platform: 'web', name: 'TheMealDB' },
+  };
+}
+
+const URL_NOISE = new Set(['reel', 'reels', 'share', 'watch', 'videos', 'video', 'posts', 'post', 'permalink', 'story', 'groups', 'photo', 'photos', 'p', 'r', 'v', 'tv', 'shorts', 'pin', 'status', 'www', 'm']);
+
+// Best guess at a dish name from a link, e.g. ".../videos/easy-beef-lasagna/1234" -> "easy beef lasagna".
+export function guessDishFromUrl(url) {
+  let path;
+  try { path = new URL(url).pathname; } catch { return ''; }
+  const candidates = path.split('/').map((seg) => decodeURIComponent(seg).toLowerCase())
+    .filter((seg) => /[a-z]/.test(seg) && seg.includes('-') && !URL_NOISE.has(seg))
+    .map((seg) => seg.replace(/\.(html?|php)$/, '').replace(/[-_]+/g, ' ').replace(/\b\d{4,}\b/g, '').replace(/\s+/g, ' ').trim())
+    .filter((seg) => seg.split(' ').length >= 2 && !/^[a-z0-9]{1,3}( [a-z0-9]{1,3})*$/.test(seg));
+  return candidates.sort((a, b) => b.length - a.length)[0] || '';
+}
+
+// Text of a post from Facebook's public embed page (plugins/post.php), which
+// keeps the message in <p> tags and doesn't require a login for public posts.
+export function textFromEmbedHtml(html) {
+  const paras = [...String(html).matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
+    .map((m) => stripTags(m[1].replace(/<br\s*\/?>/gi, '\n')))
+    .filter(Boolean);
+  return paras.join('\n').trim();
+}
+
+// Login walls come back as a successful page with no post content in it.
+export function looksLikeLoginWall(html) {
+  const title = stripTags(String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').toLowerCase();
+  return /^(log in|log into|login|sign up|facebook|instagram)\b/.test(title) && !/og:description/i.test(html);
+}

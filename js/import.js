@@ -1,11 +1,17 @@
-// Network + device imports: links, photos (OCR) and image compression.
-import { extractRecipeFromHtml, parseRecipeText, platformFromUrl, hostFromUrl, cleanSocialCaption } from './parse.js';
+// Network + device imports: links, recipe search, photos (OCR) and image compression.
+import {
+  extractRecipeFromHtml, parseRecipeText, platformFromUrl, hostFromUrl, cleanSocialCaption,
+  recipeFromMealDb, guessDishFromUrl, textFromEmbedHtml, looksLikeLoginWall,
+} from './parse.js';
 
 // Most sites don't send CORS headers, so a static app needs a relay to read their HTML.
-// These public relays only ever see the URL being imported. Users can turn this off in Profile.
-const PROXIES = [
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+// These free public services only ever see the URL being imported. Users can turn this
+// off in Profile. They're raced in parallel and the first usable page wins.
+const RELAYS = [
+  // Reader service that renders the page and returns its HTML.
+  { url: (u) => `https://r.jina.ai/${u}`, headers: { 'X-Return-Format': 'html' } },
+  { url: (u) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(u)}` },
+  { url: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
 ];
 
 export class ImportError extends Error {
@@ -18,29 +24,38 @@ export class ImportError extends Error {
 async function fetchWithTimeout(url, ms = 12000, opts = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
+  const onAbort = () => ctrl.abort();
+  opts.signal?.addEventListener('abort', onAbort);
   try {
     const res = await fetch(url, { ...opts, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res;
   } finally {
     clearTimeout(t);
+    opts.signal?.removeEventListener('abort', onAbort);
   }
 }
 
+async function readPage(url, opts) {
+  const text = await (await fetchWithTimeout(url, 15000, opts)).text();
+  if (!text || text.length < 200) throw new Error('Empty page');
+  return text;
+}
+
 async function fetchText(url, { useProxy }) {
-  const attempts = [() => fetchWithTimeout(url, 8000)];
-  if (useProxy) PROXIES.forEach((p) => attempts.push(() => fetchWithTimeout(p(url))));
-  let lastErr;
-  for (const attempt of attempts) {
-    try {
-      const res = await attempt();
-      const text = await res.text();
-      if (text && text.length > 200) return text;
-    } catch (e) {
-      lastErr = e;
-    }
+  try {
+    return await readPage(url, {});
+  } catch (directErr) {
+    if (!useProxy) throw directErr;
   }
-  throw lastErr || new Error('Could not reach that page');
+  const stop = new AbortController();
+  try {
+    return await Promise.any(RELAYS.map((r) => readPage(r.url(url), { headers: r.headers, signal: stop.signal })));
+  } catch {
+    throw new Error('Could not reach that page');
+  } finally {
+    stop.abort();
+  }
 }
 
 async function fetchJson(url, { useProxy }) {
@@ -80,19 +95,34 @@ function finish(result, url, platform, author) {
   };
 }
 
+const SOCIAL_NAMES = { facebook: 'Facebook', instagram: 'Instagram', tiktok: 'TikTok' };
+
 export async function importFromUrl(input, { useProxy = true } = {}) {
   const url = normalizeUrl(input);
   if (!url) throw new ImportError('That doesn\'t look like a link. Try copying it again.');
   const platform = platformFromUrl(url);
-  let partial = { source: { url, platform, name: hostFromUrl(url) } };
+  let partial = { source: { url, platform, name: hostFromUrl(url) }, query: guessDishFromUrl(url) };
 
   if (platform === 'tiktok') {
     try {
       const o = await fetchJson(`https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`, { useProxy });
       const parsed = parseRecipeText(o.title || '');
-      partial = { ...partial, title: parsed.title, image: o.thumbnail_url, caption: o.title };
+      partial = { ...partial, title: parsed.title, image: o.thumbnail_url, caption: o.title, query: parsed.title || partial.query };
       if (hasRecipe(parsed)) return finish({ ...parsed, image: o.thumbnail_url }, url, platform, o.author_name ? `@${o.author_unique_id || o.author_name}` : '');
     } catch { /* fall through to page scrape */ }
+  }
+
+  if (platform === 'facebook' && useProxy) {
+    // Facebook's embed page shows public posts without a login.
+    try {
+      const html = await fetchText(`https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(url)}&show_text=true`, { useProxy });
+      const text = textFromEmbedHtml(html);
+      if (text) {
+        const parsed = parseRecipeText(text);
+        partial = { ...partial, title: parsed.title, caption: text, query: parsed.title || partial.query };
+        if (hasRecipe(parsed)) return finish(parsed, url, platform);
+      }
+    } catch { /* fall through */ }
   }
 
   if (platform === 'youtube') {
@@ -106,34 +136,75 @@ export async function importFromUrl(input, { useProxy = true } = {}) {
         const text = JSON.parse(`"${desc[1]}"`);
         const parsed = parseRecipeText(text);
         const fixedTitle = title ? extractRecipeFromHtml(`<title>${title}</title>`).title : parsed.title;
-        partial = { ...partial, title: fixedTitle || parsed.title, image, caption: text };
+        partial = { ...partial, title: fixedTitle || parsed.title, image, caption: text, query: fixedTitle || partial.query };
         if (hasRecipe(parsed)) return finish({ ...parsed, title: fixedTitle || parsed.title, image }, url, platform);
       }
     } catch { /* fall through */ }
   }
 
+  const social = SOCIAL_NAMES[platform];
   let html;
   try {
     html = await fetchText(url, { useProxy });
   } catch {
     throw new ImportError(
-      useProxy
-        ? 'We couldn\'t open that link. The post may be private, or the site blocked us.'
-        : 'This site doesn\'t allow direct imports. Turn on "Import helper" in Profile, or paste the recipe text.',
+      !useProxy
+        ? 'This site doesn\'t allow direct imports. Turn on "Import helper" in Profile, or paste the recipe text.'
+        : social
+          ? `${social} wouldn't let us read that post — it usually only shows posts to people who are logged in.`
+          : 'We couldn\'t reach that page. The site may be blocking apps from reading it.',
       partial,
     );
   }
   const r = extractRecipeFromHtml(html, url);
   const merged = { ...r, image: r.image || partial.image, title: r.title || partial.title };
   if (!hasRecipe(merged)) {
+    const wall = looksLikeLoginWall(html);
+    const title = wall ? partial.title : merged.title;
     throw new ImportError(
-      platform === 'instagram' || platform === 'tiktok' || platform === 'facebook'
-        ? 'We found the post but couldn\'t read its caption. Paste the caption and we\'ll do the rest.'
-        : 'We couldn\'t find a recipe on that page. Paste the recipe text instead.',
-      { ...partial, title: merged.title, image: merged.image, caption: r.caption ? cleanSocialCaption(r.caption) : partial.caption },
+      social
+        ? `${social} wouldn't show us the post's caption${wall ? ' without a login' : ''}.`
+        : 'We opened the page but couldn\'t find a recipe on it.',
+      {
+        ...partial,
+        title,
+        image: wall ? partial.image : merged.image,
+        caption: r.caption ? cleanSocialCaption(r.caption) : partial.caption,
+        query: (title && !/^(facebook|instagram|tiktok|log in)/i.test(title) ? title : '') || partial.query,
+      },
     );
   }
   return finish(merged, url, platform);
+}
+
+// ---------- Recipe search ----------
+
+const SEARCH_STOPWORDS = new Set(['recipe', 'recipes', 'easy', 'best', 'quick', 'homemade', 'the', 'and', 'with', 'my', 'how', 'make', 'simple', 'perfect', 'ever', 'minute', 'minutes', 'healthy']);
+
+async function mealDb(path) {
+  const res = await fetchWithTimeout(`https://www.themealdb.com/api/json/v1/1/${path}`, 10000);
+  return (await res.json()).meals || [];
+}
+
+// Searches a free recipe database by dish name. Tries the full phrase first,
+// then each meaningful word, so "easy cheesy beef lasagna" still finds "Lasagna".
+export async function searchRecipes(query) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const seen = new Set();
+  const out = [];
+  const add = (meals) => meals.forEach((m) => { if (!seen.has(m.idMeal)) { seen.add(m.idMeal); out.push(m); } });
+  add(await mealDb(`search.php?s=${encodeURIComponent(q)}`));
+  if (out.length < 6) {
+    const words = q.toLowerCase().split(/[^a-z]+/).filter((w) => w.length > 3 && !SEARCH_STOPWORDS.has(w));
+    const results = await Promise.allSettled(words.slice(0, 4).map((w) => mealDb(`search.php?s=${encodeURIComponent(w)}`)));
+    results.forEach((r) => { if (r.status === 'fulfilled') add(r.value); });
+  }
+  return out.slice(0, 18).map(recipeFromMealDb);
+}
+
+export function webSearchUrl(query) {
+  return `https://www.google.com/search?q=${encodeURIComponent(`${query} recipe`)}`;
 }
 
 // ---------- OCR ----------

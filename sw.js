@@ -1,5 +1,5 @@
 // Offline support: cache the app shell, serve it cache-first, refresh in the background.
-const CACHE = 'forkful-v1';
+const CACHE = 'forkful-v2';
 const SHELL = [
   './', './index.html', './css/app.css', './js/app.js', './js/parse.js', './js/store.js', './js/samples.js', './js/import.js',
   './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-180.png',

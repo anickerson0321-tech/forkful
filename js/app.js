@@ -1,7 +1,7 @@
 import * as P from './parse.js';
 import * as S from './store.js';
 import { SAMPLE_RECIPES, DISCOVER_CATEGORIES } from './samples.js';
-import { importFromUrl, ocrImage, compressImage, ImportError } from './import.js';
+import { importFromUrl, searchRecipes, webSearchUrl, ocrImage, compressImage, ImportError } from './import.js';
 
 const state = S.state;
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -728,7 +728,8 @@ function importSheet(mode = 'menu', prefill = {}) {
     s.set(`
       <h2 class="sheet-title">Add a recipe</h2>
       <div class="import-options">
-        <button class="import-opt" data-mode="link"><span class="io-ic">${icon('link')}</span><span><strong>Paste a link</strong><small>Instagram, TikTok, YouTube, Pinterest or any recipe site</small></span>${icon('fwd')}</button>
+        <button class="import-opt" data-mode="link"><span class="io-ic">${icon('link')}</span><span><strong>Paste a link</strong><small>TikTok, YouTube, Facebook, Instagram or any recipe site</small></span>${icon('fwd')}</button>
+        <button class="import-opt" data-mode="search"><span class="io-ic">${icon('search')}</span><span><strong>Find by dish name</strong><small>Search recipes with photos and pick the one that matches</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="text"><span class="io-ic">${icon('text')}</span><span><strong>Paste text</strong><small>A caption, a message from a friend, your notes</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="scan"><span class="io-ic">${icon('camera')}</span><span><strong>Scan a photo</strong><small>Cookbook page, recipe card or screenshot</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="manual"><span class="io-ic">${icon('edit')}</span><span><strong>Write from scratch</strong><small>Type in your own creation</small></span>${icon('fwd')}</button>
@@ -747,13 +748,13 @@ function importSheet(mode = 'menu', prefill = {}) {
     toast('Recipe saved 🎉');
   };
 
-  const link = (value = '') => {
+  const link = (value = '', autostart = false) => {
     s.set(`${backBtn}
       <h2 class="sheet-title">Import from a link</h2>
       <form id="linkForm" class="stack">
         <div class="paste-row"><input id="linkInput" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://www.tiktok.com/@chef/video/…" value="${esc(value)}" required>
         ${navigator.clipboard?.readText ? `<button type="button" class="btn ghost sm" id="pasteBtn">Paste</button>` : ''}</div>
-        <div class="platforms"><span>Instagram</span><span>TikTok</span><span>YouTube</span><span>Pinterest</span><span>Blogs & sites</span></div>
+        <div class="platforms"><span>TikTok</span><span>YouTube</span><span>Facebook</span><span>Instagram</span><span>Pinterest</span><span>Blogs & sites</span></div>
         <div id="linkStatus"></div>
         <button class="btn primary full" id="linkGo">${icon('sparkle')} Import recipe</button>
       </form>`);
@@ -775,12 +776,79 @@ function importSheet(mode = 'menu', prefill = {}) {
         btn.disabled = false;
         const partial = err instanceof ImportError ? err.partial : {};
         status.innerHTML = `<div class="error">${esc(err.message || 'Import failed')}</div>
-          <button type="button" class="btn soft full" id="toText">${icon('text')} Paste the caption instead</button>`;
+          <div class="stack">
+            <button type="button" class="btn primary full" id="toSearch">${icon('search')} Find a matching recipe</button>
+            <button type="button" class="btn soft full" id="toText">${icon('text')} Paste the caption instead</button>
+          </div>`;
+        btn.hidden = true;
+        s.el.querySelector('#toSearch').onclick = () => search(partial.query || partial.title || '', partial.source?.url || input.value);
         s.el.querySelector('#toText').onclick = () => text(partial.caption || '', partial);
       }
     };
+    input.oninput = () => { btn.hidden = false; };
     if (!value) setTimeout(() => input.focus(), 250);
-    else if (prefill.autostart) s.el.querySelector('#linkForm').requestSubmit();
+    else if (autostart) s.el.querySelector('#linkForm').requestSubmit();
+  };
+
+  // Recipe search, used when a link can't be read. Results show photos so the
+  // person can pick the one that looks like the post they saw.
+  const search = (query = '', originUrl = '') => {
+    s.set(`${backBtn}
+      <h2 class="sheet-title">Find a matching recipe</h2>
+      <p class="muted">Search by the dish name, then tap the one whose photo looks like the post.</p>
+      <form id="searchForm" class="paste-row">
+        <input id="searchInput" type="search" placeholder="e.g. chicken alfredo" value="${esc(query)}" autocomplete="off" enterkeyhint="search">
+        <button class="btn primary sm">${icon('search')}</button>
+      </form>
+      <div id="searchResults"></div>
+      <div class="web-fallback">
+        <p class="muted small">Not there? Search the whole web, copy a recipe link, then paste it here.</p>
+        <a class="btn soft full" id="webSearch" target="_blank" rel="noopener">${icon('search')} Search Google</a>
+        <form id="foundForm" class="paste-row">
+          <input id="foundInput" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste a recipe link">
+          <button class="btn primary sm">Import</button>
+        </form>
+      </div>`);
+    bindBack();
+    const input = s.el.querySelector('#searchInput');
+    const results = s.el.querySelector('#searchResults');
+    const web = s.el.querySelector('#webSearch');
+    const syncWeb = () => { web.href = webSearchUrl(input.value.trim() || 'dinner'); };
+    input.addEventListener('input', syncWeb);
+    syncWeb();
+    let seq = 0;
+    const run = async () => {
+      const q = input.value.trim();
+      if (!q) { results.innerHTML = ''; input.focus(); return; }
+      const mine = ++seq;
+      results.innerHTML = `<div class="loading"><span class="spinner"></span> Searching…</div>`;
+      try {
+        const found = await searchRecipes(q);
+        if (mine !== seq) return;
+        if (!found.length) {
+          results.innerHTML = `<p class="muted small center">No matches for “${esc(q)}”. Try a simpler name like “lasagna”, or search Google below.</p>`;
+          return;
+        }
+        results.innerHTML = `<div class="result-grid">${found.map((r, i) => `<button type="button" class="result" data-i="${i}">
+          ${thumb(r)}<span><strong>${esc(r.title)}</strong><small>${esc(r.description)} · ${r.ingredients.length} ingredients</small></span></button>`).join('')}</div>`;
+        results.querySelectorAll('.result').forEach((b) => {
+          b.onclick = () => {
+            const r = found[+b.dataset.i];
+            finishImport(r, originUrl ? { notes: `Matched from: ${originUrl}` } : {});
+          };
+        });
+      } catch {
+        if (mine === seq) results.innerHTML = `<div class="error">Recipe search isn't reachable right now. Try Google below.</div>`;
+      }
+    };
+    s.el.querySelector('#searchForm').onsubmit = (e) => { e.preventDefault(); run(); };
+    s.el.querySelector('#foundForm').onsubmit = (e) => {
+      e.preventDefault();
+      const v = s.el.querySelector('#foundInput').value.trim();
+      if (v) link(v, true);
+    };
+    if (query) run();
+    else setTimeout(() => input.focus(), 250);
   };
 
   const text = (value = '', partial = {}) => {
@@ -857,7 +925,8 @@ function importSheet(mode = 'menu', prefill = {}) {
   };
 
   const show = (m) => {
-    if (m === 'link') link(prefill.url || '');
+    if (m === 'link') link(prefill.url || '', !!prefill.autostart);
+    else if (m === 'search') search(prefill.query || '');
     else if (m === 'text') text(prefill.text || '');
     else if (m === 'scan') scan();
     else if (m === 'manual') { s.close(); ui.draft = null; go('#/edit/new'); }

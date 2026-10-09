@@ -4,6 +4,7 @@ import {
   parseIngredient, displayIngredient, formatQuantity, parseISODuration, parseDurationText, findTimers,
   parseRecipeText, extractRecipeFromHtml, categorize, addToGroceryList, groceryAmount, estimateNutrition,
   convertTemperatures, cleanSocialCaption, ingredientsInStep, normalizeName, platformFromUrl,
+  recipeFromMealDb, guessDishFromUrl, textFromEmbedHtml, looksLikeLoginWall,
 } from '../js/parse.js';
 
 test('parses quantities, units, names and notes', () => {
@@ -201,6 +202,41 @@ test('platform detection', () => {
   assert.equal(platformFromUrl('https://instagram.com/reel/x'), 'instagram');
   assert.equal(platformFromUrl('https://youtu.be/x'), 'youtube');
   assert.equal(platformFromUrl('https://cooking.example.com/r'), 'web');
+});
+
+test('maps a recipe search result', () => {
+  const r = recipeFromMealDb({
+    idMeal: '52772', strMeal: 'Teriyaki Chicken Casserole', strCategory: 'Chicken', strArea: 'Japanese', strTags: 'Meat,Casserole',
+    strMealThumb: 'https://www.themealdb.com/images/media/meals/wvpsxx1468256321.jpg', strSource: '',
+    strInstructions: 'STEP 1\r\nPreheat oven to 350° F.\r\n\r\nSTEP 2\r\nCombine soy sauce and honey in a pan.',
+    strIngredient1: 'soy sauce', strMeasure1: '3/4 cup', strIngredient2: 'honey', strMeasure2: '1/2 cup', strIngredient3: '', strMeasure3: ' ', strIngredient4: null,
+  });
+  assert.equal(r.title, 'Teriyaki Chicken Casserole');
+  assert.deepEqual(r.ingredients, ['3/4 cup soy sauce', '1/2 cup honey']);
+  assert.deepEqual(r.instructions, ['Preheat oven to 350° F.', 'Combine soy sauce and honey in a pan.']);
+  assert.deepEqual(r.tags, ['chicken', 'japanese', 'meat', 'casserole']);
+  assert.equal(r.source.url, 'https://www.themealdb.com/meal/52772');
+  assert.equal(r.source.name, 'TheMealDB');
+});
+
+test('guesses a dish name from a link', () => {
+  assert.equal(guessDishFromUrl('https://www.facebook.com/tastyrecipes/videos/easy-beef-lasagna/1234567890/'), 'easy beef lasagna');
+  assert.equal(guessDishFromUrl('https://www.facebook.com/share/r/1AbCdEfGh/'), '');
+  assert.equal(guessDishFromUrl('https://www.facebook.com/reel/1234567890'), '');
+  assert.equal(guessDishFromUrl('https://cooking.example.com/recipes/12345-crispy-chicken-thighs'), 'crispy chicken thighs');
+  assert.equal(guessDishFromUrl('not a url'), '');
+});
+
+test('reads post text from an embed page and spots login walls', () => {
+  const embed = '<div class="userContent"><p>Garlic Butter Shrimp<br>Ingredients:<br>1 lb shrimp<br>3 tbsp butter</p><p>Steps:<br>Melt butter and cook shrimp for 3 minutes.</p></div>';
+  const text = textFromEmbedHtml(embed);
+  assert.match(text, /^Garlic Butter Shrimp\nIngredients:/);
+  const r = parseRecipeText(text);
+  assert.deepEqual(r.ingredients, ['1 lb shrimp', '3 tbsp butter']);
+  assert.equal(r.instructions.length, 1);
+  assert.equal(looksLikeLoginWall('<html><head><title>Log into Facebook</title></head><body>…</body></html>'), true);
+  assert.equal(looksLikeLoginWall('<title>Facebook</title><meta property="og:description" content="Recipe…">'), false);
+  assert.equal(looksLikeLoginWall('<title>Best Brownies</title>'), false);
 });
 
 function pick(p) {
