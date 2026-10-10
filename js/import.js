@@ -2,7 +2,7 @@
 import {
   extractRecipeFromHtml, parseRecipeText, platformFromUrl, hostFromUrl, cleanSocialCaption,
   recipeFromMealDb, guessDishFromUrl, textFromEmbedHtml, looksLikeLoginWall,
-  instagramShortcode, parseInstagramEmbed, describePage,
+  instagramShortcode, parseInstagramEmbed, describePage, parseMarkdownRecipe, parseSearchResults,
 } from './parse.js';
 
 // Most sites don't send CORS headers, so a static app needs a relay to read their HTML.
@@ -119,6 +119,8 @@ function finish(result, url, platform, author) {
     tags: result.tags || [],
     notes: result.notes || '',
     nutrition: result.nutrition || null,
+    sourceRating: result.rating || null,
+    sourceRatingCount: result.ratingCount || null,
     source: { url, platform, name: author || result.author || hostFromUrl(url) },
   };
 }
@@ -210,6 +212,11 @@ export async function importFromUrl(input, { useProxy = true, server = '' } = {}
   const r = extractRecipeFromHtml(html, url);
   const merged = { ...r, image: r.image || partial.image, title: r.title || partial.title };
   if (hasRecipe(merged)) return finish(merged, url, platform);
+  ctx.log.push('No recipe data on the page');
+  if (!social && useProxy) {
+    const md = await readAsMarkdown(url, ctx);
+    if (md) return finish({ ...md, image: md.image || merged.image }, url, platform);
+  }
   const wall = looksLikeLoginWall(html);
   const caption = r.caption ? cleanSocialCaption(r.caption) : '';
   if (caption && caption.length > (partial.caption?.length || 0)) {
@@ -230,6 +237,66 @@ export async function importFromUrl(input, { useProxy = true, server = '' } = {}
       query: (title && !/^(facebook|instagram|tiktok|log in)/i.test(title) ? title : '') || partial.query,
     },
   );
+}
+
+// The r.jina.ai reader renders the page and returns it as Markdown; useful when a site's
+// HTML hides the recipe from simple parsing.
+async function readAsMarkdown(url, ctx) {
+  try {
+    const text = await readPage(`https://r.jina.ai/${url}`, { headers: { 'X-Return-Format': 'markdown' } });
+    const r = parseMarkdownRecipe(text);
+    ctx.log.push(r ? `Read the page as text: found ${r.ingredients.length} ingredients` : 'Read the page as text: no ingredient list');
+    return r;
+  } catch (e) {
+    ctx.log.push(`Read the page as text: failed (${e.message})`);
+    return null;
+  }
+}
+
+// ---------- Web recipe search ----------
+
+// Searches the web for recipe pages, then loads each one in the background and reports
+// full recipes (with photo, time and rating) as they arrive through onResult.
+export async function searchWeb(query, { useProxy = true, server = '', onResults = () => {}, onRecipe = () => {}, limit = 8 } = {}) {
+  const q = `${String(query).trim()} recipe`;
+  const ctx = { useProxy, server, log: [] };
+  let results = [];
+  const engines = [
+    `https://www.bing.com/search?format=rss&count=20&q=${encodeURIComponent(q)}`,
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+  ];
+  for (const engine of engines) {
+    try {
+      results = parseSearchResults(await fetchPage(engine, ctx, 'Search'));
+      if (results.length) break;
+    } catch { /* try the next engine */ }
+  }
+  results = results.slice(0, limit);
+  onResults(results);
+  let next = 0;
+  const worker = async () => {
+    while (next < results.length) {
+      const i = next++;
+      const item = results[i];
+      try {
+        const html = await fetchPage(item.url, { ...ctx, log: [] }, 'Recipe page');
+        const r = extractRecipeFromHtml(html, item.url);
+        onRecipe(i, hasRecipe(r) ? finish({ ...r, title: r.title || item.title }, item.url, 'web') : null, r);
+      } catch {
+        onRecipe(i, null);
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return { results, log: ctx.log };
+}
+
+// Checks that an import server answers (used by Profile → Test connection).
+export async function testServer(server) {
+  const res = await fetchWithTimeout(serverUrl(server, 'https://example.com/', 'browser'), 15000);
+  const text = await res.text();
+  if (!/Example Domain/i.test(text)) throw new Error('unexpected answer');
+  return true;
 }
 
 // ---------- Recipe search ----------

@@ -674,6 +674,8 @@ export function recipeFromJsonLd(node, baseUrl = '') {
     tags: tags.slice(0, 6),
     nutrition: Object.values(nutrition).some((x) => x != null) ? nutrition : null,
     author: author ? stripTags(author) : '',
+    rating: node.aggregateRating ? Math.round(parseFloat(node.aggregateRating.ratingValue) * 10) / 10 || null : null,
+    ratingCount: node.aggregateRating ? parseInt(String(node.aggregateRating.ratingCount ?? node.aggregateRating.reviewCount ?? '').replace(/\D/g, ''), 10) || null : null,
   };
 }
 
@@ -707,6 +709,9 @@ export function extractRecipeFromHtml(html, baseUrl = '') {
       if (r.ingredients.length || r.instructions.length) return { ...r, method: 'schema' };
     }
   }
+  // Recipe-card markup without structured data (class names like "wprm-recipe-ingredient").
+  const markup = recipeFromMarkup(html, baseUrl);
+  if (markup) return { ...markup, method: 'markup' };
   // Fallback: Open Graph caption (social posts) parsed as free text.
   const ogTitle = metaContent(html, 'og:title') || stripTags(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
   const ogDesc = metaContent(html, 'og:description') || metaContent(html, 'description');
@@ -1103,4 +1108,128 @@ export function cleanScreenshotText(text) {
       return rest.length && isHandle(first) && /^[A-Z0-9"“(]/.test(rest[0]) ? rest.join(' ') : l;
     })
     .join('\n');
+}
+
+
+// ---------- Recipe pages without structured data ----------
+
+function listItemsWithClass(html, classRe) {
+  const out = [];
+  const re = /<li\b([^>]*)>([\s\S]*?)<\/li>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const cls = m[1].match(/class=["']([^"']*)["']/i)?.[1] || '';
+    if (!classRe.test(cls)) continue;
+    const text = stripTags(m[2].replace(/<\/(p|div|span)>/gi, ' $&')).replace(/\s+/g, ' ').trim();
+    if (text.length > 1 && text.length < 600 && !out.includes(text)) out.push(text);
+  }
+  return out;
+}
+
+// Reads ingredients and steps from common recipe-card markup (WP Recipe Maker, Tasty
+// Recipes, Mediavine Create, and sites that name their lists "ingredients"/"instructions").
+export function recipeFromMarkup(html, baseUrl = '') {
+  const h = String(html);
+  const ingredients = listItemsWithClass(h, /ingredient(?!s?-?(group|list|section|header|title|name)\b)/i)
+    .filter((t) => !/^(ingredients?|deselect all|select all)$/i.test(t));
+  let instructions = listItemsWithClass(h, /(instruction|direction|method|step)(?!s?-?(group|list|section|header|title)\b)/i);
+  if (!instructions.length) {
+    const block = h.match(/<(ol|ul|div)\b[^>]*class=["'][^"']*(instructions|directions|method|preparation)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i)?.[3] || '';
+    instructions = [...block.matchAll(/<(li|p)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((m) => stripTags(m[2]).replace(/\s+/g, ' ').trim()).filter((t) => t.length > 8);
+  }
+  if (ingredients.length < 2) return null;
+  const title = metaContent(h, 'og:title') || stripTags(h.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || '') || stripTags(h.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
+  const meta = extractMeta(stripTags(h.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ')).slice(0, 20000));
+  return {
+    title: cleanTitle(title.replace(/\s*[|–—-]\s*[^|–—-]{2,40}$/, '')),
+    description: metaContent(h, 'og:description').slice(0, 400),
+    image: resolveUrl(metaContent(h, 'og:image'), baseUrl),
+    servings: meta.servings || null,
+    prepTime: meta.prepTime || null,
+    cookTime: meta.cookTime || null,
+    ingredients,
+    instructions: instructions.map((t) => cleanListLine(t) || t),
+    tags: [],
+    nutrition: null,
+    author: '',
+  };
+}
+
+// Reads a recipe out of a page converted to Markdown (the r.jina.ai reader's text mode):
+// takes the "Ingredients" and "Instructions/Directions/Method" sections.
+export function parseMarkdownRecipe(md) {
+  const text = String(md ?? '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*|__/g, '');
+  const title = text.match(/^Title:\s*(.+)$/m)?.[1]?.trim() || text.match(/^#\s+(.+)$/m)?.[1]?.trim() || '';
+  const lines = text.split('\n');
+  const sections = [];
+  let cur = null;
+  for (const raw of lines) {
+    const line = raw.trim();
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*$/) || (/^[A-Z][A-Za-z &']{2,30}:?$/.test(line) && headingKind(line) ? [null, '###', line] : null);
+    if (heading) {
+      cur = { level: heading[1].length, name: heading[2].replace(/:$/, ''), lines: [] };
+      sections.push(cur);
+    } else if (cur && line) {
+      cur.lines.push(line);
+    }
+  }
+  const pick = (kind) => {
+    const i = sections.findIndex((sec) => headingKind(sec.name) === kind || (kind === 'ingredients' && /^ingredients?\b/i.test(sec.name)));
+    if (i < 0) return [];
+    const out = [...sections[i].lines];
+    // Include sub-sections ("For the sauce") until a heading at the same or higher level.
+    for (let j = i + 1; j < sections.length && sections[j].level > sections[i].level; j++) {
+      out.push(`## ${sections[j].name}`, ...sections[j].lines);
+    }
+    return out;
+  };
+  const ing = pick('ingredients').filter((l) => /^##|^\s*([-*•]|\d+[.)])\s+/.test(l) || readQuantity(cleanListLine(l)));
+  const steps = pick('steps').filter((l) => /^##|^\s*([-*•]|\d+[.)])\s+/.test(l) || l.length > 30);
+  if (ing.filter((l) => !l.startsWith('##')).length < 2) return null;
+  const parsed = parseRecipeText([title, 'Ingredients:', ...ing.map((l) => l.replace(/^##\s*/, '').replace(/^([^:]+)$/, (x) => (l.startsWith('##') ? `${x}:` : x))), 'Instructions:', ...steps.filter((l) => !l.startsWith('##'))].join('\n'));
+  return { ...parsed, title: cleanTitle(title) || parsed.title };
+}
+
+// ---------- Web search results ----------
+
+const NOT_RECIPE_HOSTS = /(^|\.)(youtube\.com|youtu\.be|pinterest\.[a-z.]+|facebook\.com|instagram\.com|tiktok\.com|reddit\.com|x\.com|twitter\.com|amazon\.[a-z.]+|wikipedia\.org|quora\.com|bing\.com|duckduckgo\.com|google\.[a-z.]+|msn\.com)$/i;
+
+export function isLikelyRecipeUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!/^https?:$/.test(u.protocol) || NOT_RECIPE_HOSTS.test(u.hostname)) return false;
+    const path = u.pathname.toLowerCase();
+    if (path === '/' || /\/(tag|tags|category|categories|collections?|search|gallery|galleries|videos?)\//.test(path)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Parses Bing RSS (format=rss) or DuckDuckGo's HTML results page into [{ title, url, snippet }].
+export function parseSearchResults(body) {
+  const b = String(body);
+  const out = [];
+  const add = (title, url, snippet = '') => {
+    url = decodeEntities(url).trim();
+    if (!isLikelyRecipeUrl(url) || out.some((r) => r.url === url)) return;
+    out.push({ title: stripTags(title), url, snippet: stripTags(snippet).slice(0, 160), site: hostFromUrl(url) });
+  };
+  for (const m of b.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const item = m[1];
+    const title = item.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || '';
+    const link = item.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || '';
+    add(title.replace(/^<!\[CDATA\[|\]\]>$/g, ''), link.replace(/^<!\[CDATA\[|\]\]>$/g, ''), item.match(/<description>([\s\S]*?)<\/description>/i)?.[1] || '');
+  }
+  for (const m of b.matchAll(/<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+    let href = decodeEntities(m[1]);
+    const uddg = href.match(/[?&]uddg=([^&]+)/)?.[1];
+    if (uddg) href = decodeURIComponent(uddg);
+    if (href.startsWith('//')) href = `https:${href}`;
+    add(m[2], href);
+  }
+  return out;
 }

@@ -51,6 +51,12 @@ test('recipe sites are fetched as a browser; failures report a status', async ()
   let res = await call(`url=${encodeURIComponent('https://blog.example/brownies')}`);
   assert.equal(res.status, 200);
   assert.ok(calls[0].ua.startsWith('Mozilla'));
+  assert.match(await res.text(), /yyyy/);
+  // Non-social pages are passed through even when short (e.g. search results).
+  mockFetch(() => new Response('<rss><item/></rss>', { headers: { 'Content-Type': 'application/rss+xml' } }));
+  res = await call(`url=${encodeURIComponent('https://www.bing.com/search?format=rss&q=x')}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Content-Type'), 'application/rss+xml');
   calls = mockFetch(() => new Response(`<title>Log in</title>${'z'.repeat(400)}`));
   res = await call(`url=${encodeURIComponent('https://www.facebook.com/x')}`);
   assert.equal(res.status, 422);
