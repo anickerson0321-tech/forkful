@@ -40,7 +40,8 @@ function load() {
 
 export const state = load();
 
-export function save() {
+// `silent` skips re-rendering, for changes made while the person is still using the screen.
+export function save({ silent = false } = {}) {
   try {
     localStorage.setItem(KEY, JSON.stringify(state));
   } catch (e) {
@@ -48,7 +49,7 @@ export function save() {
     listeners.forEach((fn) => fn({ error: 'storage' }));
     return false;
   }
-  listeners.forEach((fn) => fn({}));
+  if (!silent) listeners.forEach((fn) => fn({}));
   return true;
 }
 
@@ -199,9 +200,9 @@ export function clearGroceries(onlyChecked) {
 
 // ---------- Settings & data ----------
 
-export function setSetting(key, value) {
+export function setSetting(key, value, opts) {
   state.settings[key] = value;
-  save();
+  save(opts);
 }
 
 export function exportData() {

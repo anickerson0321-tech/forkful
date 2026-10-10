@@ -52,8 +52,9 @@ export default {
       return new Response('That address is not allowed.', { status: 400, headers: cors });
     }
 
+    const social = SOCIAL_HOST.test(target.hostname);
     const want = params.get('ua');
-    const first = want === 'bot' || want === 'browser' ? want : SOCIAL_HOST.test(target.hostname) ? 'bot' : 'browser';
+    const first = want === 'bot' || want === 'browser' ? want : social ? 'bot' : 'browser';
     const order = [first, first === 'bot' ? 'browser' : 'bot'];
     let last = { status: 502, body: 'Fetch failed' };
     for (const ua of order) {
@@ -62,6 +63,13 @@ export default {
           redirect: 'follow',
           headers: { 'User-Agent': USER_AGENTS[ua], Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9' },
         });
+        // Recipe sites and search engines: pass the page straight through (keeps CPU use
+        // tiny on the free plan). Social sites: check for a login page and retry.
+        if (res.ok && !social) {
+          return new Response(res.body, {
+            headers: { ...cors, 'Content-Type': res.headers.get('Content-Type') || 'text/html; charset=utf-8', 'X-Final-Url': res.url, 'X-Fetched-As': ua },
+          });
+        }
         const body = await res.text();
         if (res.ok && body.length > 300 && !looksLikeLoginWall(body)) {
           return new Response(body, {

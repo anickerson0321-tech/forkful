@@ -1,9 +1,10 @@
 import * as P from './parse.js';
 import * as S from './store.js';
 import { SAMPLE_RECIPES, DISCOVER_CATEGORIES } from './samples.js';
-import { importFromUrl, searchRecipes, webSearchUrl, ocrImage, compressImage, ImportError } from './import.js';
+import { importFromUrl, searchRecipes, searchWeb, testServer, webSearchUrl, ocrImage, compressImage, ImportError } from './import.js';
 
 const state = S.state;
+const DEPLOY_URL = 'https://deploy.workers.cloudflare.com/?url=https://github.com/anickerson0321-tech/forkful/tree/main/worker';
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 
@@ -492,7 +493,8 @@ const VIEWS = {
           <button class="btn primary sm" data-action="import">${icon('link')} Import</button>
         </div>` : ''}
       <div class="chips scroll">${DISCOVER_CATEGORIES.map((c) => `<button class="chip ${ui.discoverCat === c.id ? 'on' : ''}" data-action="discover-cat" data-cat="${c.id}">${c.label}</button>`).join('')}</div>
-      ${list.length ? `<div class="grid">${list.map((r) => recipeCard(r, { sample: true })).join('')}</div>` : emptyState('🥄', 'No ideas found', 'Try another search or category.')}`;
+      ${q ? `<button class="btn soft full web-search-btn" data-action="web-search" data-q="${esc(q)}">${icon('search')} Search recipe websites for “${esc(q)}”</button>` : ''}
+      ${list.length ? `<div class="grid">${list.map((r) => recipeCard(r, { sample: true })).join('')}</div>` : q ? '' : emptyState('🥄', 'No ideas found', 'Try another category.')}`;
   },
 
   edit(id) {
@@ -603,8 +605,24 @@ const VIEWS = {
         <div class="setting"><div><strong>Appearance</strong></div></div>
         ${seg('theme', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']])}
         <div class="setting"><div><strong>Keep screen on in Cook Mode</strong><small>So your phone doesn't lock mid-recipe</small></div>${toggle('wakeLock')}</div>
-        <label class="field server-field"><span>Your import server <small>optional · makes Instagram & Facebook imports more reliable</small></span>
-          <input id="importServer" type="url" inputmode="url" data-change="import-server" placeholder="https://forkful-import.yourname.workers.dev" value="${esc(s.importServer || '')}"></label>
+        <div class="server-box">
+          <div class="setting"><div><strong>Your import server ${s.importServer ? '<span class="ok-pill">On</span>' : ''}</strong>
+            <small>${s.importServer ? 'Recipes load through your own server first.' : 'Not set up yet. This is what makes Allrecipes, Instagram and Facebook imports and recipe search work reliably.'}</small></div></div>
+          <div class="paste-row">
+            <input id="importServer" type="url" inputmode="url" autocapitalize="off" data-change="import-server" placeholder="https://forkful-import.yourname.workers.dev" value="${esc(s.importServer || '')}">
+            <button class="btn soft sm" data-action="test-server">Test</button>
+          </div>
+          <div id="serverStatus"></div>
+          <details class="server-guide" ${s.importServer ? '' : 'open'}><summary>How to set it up (free, about 10 minutes)</summary>
+            <ol>
+              <li>Tap <a href="${DEPLOY_URL}" target="_blank" rel="noopener"><b>Deploy to Cloudflare</b></a>. Sign up or log in (free), connect GitHub when asked, and tap <b>Deploy</b>.</li>
+              <li>When it finishes, Cloudflare shows the server's address ending in <b>.workers.dev</b>. Copy it.</li>
+              <li>Paste it in the box above and tap <b>Test</b>.</li>
+            </ol>
+            <p class="muted small">If the button gives you trouble: in Cloudflare go to <b>Workers & Pages → Create → Create Worker</b>, tap <b>Deploy</b>, then <b>Edit code</b>, replace everything with the server code and tap <b>Deploy</b> again.</p>
+            <button type="button" class="btn ghost sm" data-action="copy-server-code">${icon('download')} Copy server code</button>
+          </details>
+        </div>
         <div class="setting"><div><strong>Import helper</strong><small>Uses a public relay to read sites that block direct access. The relay sees the link you import, nothing else.</small></div>${toggle('useProxy')}</div>
       </section>
       <section class="settings">
@@ -808,8 +826,8 @@ function importSheet(mode = 'menu', prefill = {}) {
       <p class="muted small center paste-hint">Works with a copied link or a copied caption.</p>` : ''}
       <div class="import-options">
         <button class="import-opt" data-mode="link"><span class="io-ic">${icon('link')}</span><span><strong>Paste a link</strong><small>TikTok, YouTube, Facebook, Instagram or any recipe site</small></span>${icon('fwd')}</button>
+        <button class="import-opt" data-mode="search"><span class="io-ic">${icon('search')}</span><span><strong>Search recipes</strong><small>Recipes from cooking websites, saved in one tap</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="scan"><span class="io-ic">${icon('camera')}</span><span><strong>Scan a screenshot or photo</strong><small>Best for Instagram & Facebook: screenshot the caption</small></span>${icon('fwd')}</button>
-        <button class="import-opt" data-mode="search"><span class="io-ic">${icon('search')}</span><span><strong>Find by dish name</strong><small>Search recipes with photos and pick the one that matches</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="text"><span class="io-ic">${icon('text')}</span><span><strong>Paste text</strong><small>A caption, a message from a friend, your notes</small></span>${icon('fwd')}</button>
         <button class="import-opt" data-mode="manual"><span class="io-ic">${icon('edit')}</span><span><strong>Write from scratch</strong><small>Type in your own creation</small></span>${icon('fwd')}</button>
       </div>`);
@@ -893,55 +911,98 @@ function importSheet(mode = 'menu', prefill = {}) {
     else if (autostart) s.el.querySelector('#linkForm').requestSubmit();
   };
 
-  // Recipe search, used when a link can't be read. Results show photos so the
-  // person can pick the one that looks like the post they saw.
+  // Recipe search: real recipe websites (each loads in the background; one tap saves it)
+  // plus a small database of classics. Also offered when a link can't be read, so the
+  // person can pick the one whose photo looks like the post they saw.
   const search = (query = '', originUrl = '') => {
+    const server = state.settings.importServer || '';
+    const useProxy = state.settings.useProxy !== false;
     s.set(`${backBtn}
-      <h2 class="sheet-title">Find a matching recipe</h2>
-      <p class="muted">Search by the dish name, then tap the one whose photo looks like the post.</p>
+      <h2 class="sheet-title">Find a recipe</h2>
       <form id="searchForm" class="paste-row">
         <input id="searchInput" type="search" placeholder="e.g. chicken alfredo" value="${esc(query)}" autocomplete="off" enterkeyhint="search">
-        <button class="btn primary sm">${icon('search')}</button>
+        <button class="btn primary sm" aria-label="Search">${icon('search')}</button>
       </form>
-      <div id="searchResults"></div>
+      ${server ? '' : `<p class="muted small search-tip">Tip: set up your import server in Profile and more sites will load, faster.</p>`}
+      <div id="webResults"></div>
+      <div id="dbResults"></div>
       <div class="web-fallback">
-        <p class="muted small">Not there? Search the whole web, copy a recipe link, then paste it here.</p>
-        <a class="btn soft full" id="webSearch" target="_blank" rel="noopener">${icon('search')} Search Google</a>
+        <p class="muted small"><strong>Found a recipe somewhere else?</strong> On the recipe page in Chrome, tap <b>Share → Forkful</b> and it's saved for you. Or paste its link here:</p>
         <form id="foundForm" class="paste-row">
           <input id="foundInput" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste a recipe link">
           <button class="btn primary sm">Import</button>
         </form>
+        <a class="link-btn" id="webSearch" target="_blank" rel="noopener">${icon('search')} Search Google instead</a>
       </div>`);
     bindBack();
     const input = s.el.querySelector('#searchInput');
-    const results = s.el.querySelector('#searchResults');
-    const web = s.el.querySelector('#webSearch');
-    const syncWeb = () => { web.href = webSearchUrl(input.value.trim() || 'dinner'); };
-    input.addEventListener('input', syncWeb);
-    syncWeb();
+    const web = s.el.querySelector('#webResults');
+    const db = s.el.querySelector('#dbResults');
+    const google = s.el.querySelector('#webSearch');
+    const syncGoogle = () => { google.href = webSearchUrl(input.value.trim() || 'dinner'); };
+    input.addEventListener('input', syncGoogle);
+    syncGoogle();
+    const extra = originUrl ? { notes: `Matched from: ${originUrl}` } : {};
+    const fmtCount = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
     let seq = 0;
+
     const run = async () => {
       const q = input.value.trim();
-      if (!q) { results.innerHTML = ''; input.focus(); return; }
+      if (!q) { input.focus(); return; }
+      input.blur();
       const mine = ++seq;
-      results.innerHTML = `<div class="loading"><span class="spinner"></span> Searching…</div>`;
+      web.innerHTML = `<div class="loading"><span class="spinner"></span> Searching recipe websites…</div>`;
+      db.innerHTML = '';
+
+      searchRecipes(q).then((found) => {
+        if (mine !== seq || !found.length) return;
+        db.innerHTML = `<h3 class="results-head">Classic recipes</h3><div class="result-grid">${found.slice(0, 6).map((r, i) => `<button type="button" class="result" data-d="${i}">
+          ${thumb(r)}<span><strong>${esc(r.title)}</strong><small>${esc(r.description)}</small></span></button>`).join('')}</div>`;
+        db.querySelectorAll('[data-d]').forEach((b) => { b.onclick = () => finishImport(found[+b.dataset.d], extra); });
+      }).catch(() => {});
+
+      let list = [];
+      const loaded = [];
+      const leftover = () => {
+        if (mine !== seq || web.querySelector('[data-w]')) return;
+        web.innerHTML = `<p class="muted small center">Couldn't open any recipe websites for “${esc(q)}”${server ? '' : ' — the free relays may be busy. Try again in a minute, or set up your import server in Profile'}.</p>`;
+      };
       try {
-        const found = await searchRecipes(q);
-        if (mine !== seq) return;
-        if (!found.length) {
-          results.innerHTML = `<p class="muted small center">No matches for “${esc(q)}”. Try a simpler name like “lasagna”, or search Google below.</p>`;
-          return;
-        }
-        results.innerHTML = `<div class="result-grid">${found.map((r, i) => `<button type="button" class="result" data-i="${i}">
-          ${thumb(r)}<span><strong>${esc(r.title)}</strong><small>${esc(r.description)} · ${r.ingredients.length} ingredients</small></span></button>`).join('')}</div>`;
-        results.querySelectorAll('.result').forEach((b) => {
-          b.onclick = () => {
-            const r = found[+b.dataset.i];
-            finishImport(r, originUrl ? { notes: `Matched from: ${originUrl}` } : {});
-          };
+        await searchWeb(q, {
+          useProxy,
+          server,
+          onResults: (results) => {
+            if (mine !== seq) return;
+            list = results;
+            if (!results.length) { leftover(); return; }
+            web.innerHTML = `<h3 class="results-head">From recipe websites</h3><div class="result-grid">${results.map((r, i) => `<button type="button" class="result loading" data-w="${i}">
+              <div class="thumb skeleton"></div><span><strong>${esc(r.title)}</strong><small>${esc(r.site)}</small></span></button>`).join('')}</div>`;
+            web.querySelectorAll('[data-w]').forEach((b) => {
+              b.onclick = () => {
+                const i = +b.dataset.w;
+                if (loaded[i]) finishImport(loaded[i], extra);
+                else link(list[i].url, true);
+              };
+            });
+          },
+          onRecipe: (i, recipe) => {
+            if (mine !== seq) return;
+            const b = web.querySelector(`[data-w="${i}"]`);
+            if (!b) return;
+            if (!recipe) { b.remove(); leftover(); return; }
+            loaded[i] = recipe;
+            const t = (recipe.prepTime || 0) + (recipe.cookTime || 0);
+            const meta = [
+              recipe.sourceRating ? `★ ${recipe.sourceRating}${recipe.sourceRatingCount ? ` (${fmtCount(recipe.sourceRatingCount)})` : ''}` : '',
+              t ? P.formatMinutes(t) : '',
+              list[i].site,
+            ].filter(Boolean).join(' · ');
+            b.classList.remove('loading');
+            b.innerHTML = `${thumb(recipe)}<span><strong>${esc(recipe.title)}</strong><small>${esc(meta)}</small></span>`;
+          },
         });
       } catch {
-        if (mine === seq) results.innerHTML = `<div class="error">Recipe search isn't reachable right now. Try Google below.</div>`;
+        leftover();
       }
     };
     s.el.querySelector('#searchForm').onsubmit = (e) => { e.preventDefault(); run(); };
@@ -1413,6 +1474,31 @@ const actions = {
     else replaceRoute(el.dataset.fallback || '#/recipes');
   },
   import() { importSheet(); },
+  'web-search'(el) { importSheet('search', { query: el.dataset.q }); },
+  async 'test-server'() {
+    const input = $('#importServer');
+    const status = $('#serverStatus');
+    const v = input.value.trim().replace(/\/+$/, '');
+    if (!/^https:\/\/[^\s/]+\.[^\s]+$/i.test(v)) { status.innerHTML = '<div class="error">Paste the server address first (it starts with https://).</div>'; return; }
+    if (v !== state.settings.importServer) S.setSetting('importServer', v, { silent: true });
+    const box = status;
+    box.innerHTML = '<div class="loading"><span class="spinner"></span> Testing…</div>';
+    try {
+      await testServer(v);
+      box.innerHTML = '<div class="success">✓ Connected. Imports and recipe search will use your server.</div>';
+    } catch (e) {
+      box.innerHTML = `<div class="error">Couldn't reach your server (${esc(e.message)}). Check the address, and that the server code was deployed.</div>`;
+    }
+  },
+  async 'copy-server-code'() {
+    try {
+      const code = await (await fetch('worker/import-server.js')).text();
+      await navigator.clipboard.writeText(code);
+      toast('Server code copied');
+    } catch {
+      window.open('https://github.com/anickerson0321-tech/forkful/blob/main/worker/import-server.js', '_blank', 'noopener');
+    }
+  },
   sort(el) { ui.sort = el.dataset.sort; render(); },
   fav(el) {
     const r = S.getRecipe(el.dataset.id);
@@ -1649,7 +1735,7 @@ document.addEventListener('change', async (e) => {
   else if (kind === 'import-server') {
     const v = el.value.trim().replace(/\/+$/, '');
     if (v && !/^https:\/\/[^\s/]+\.[^\s]+$/i.test(v)) { toast('That should be a link starting with https://'); return; }
-    S.setSetting('importServer', v);
+    S.setSetting('importServer', v, { silent: true });
     toast(v ? 'Import server saved' : 'Import server removed');
   }
   else if (kind === 'photo') {

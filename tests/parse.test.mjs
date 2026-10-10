@@ -6,6 +6,7 @@ import {
   convertTemperatures, cleanSocialCaption, ingredientsInStep, normalizeName, platformFromUrl,
   recipeFromMealDb, guessDishFromUrl, textFromEmbedHtml, looksLikeLoginWall,
   instagramShortcode, parseInstagramEmbed, describePage, cleanScreenshotText,
+  recipeFromMarkup, parseMarkdownRecipe, parseSearchResults, isLikelyRecipeUrl,
 } from '../js/parse.js';
 
 test('parses quantities, units, names and notes', () => {
@@ -298,6 +299,68 @@ test('summarizes fetched pages for the Details view', () => {
   assert.match(d, /no preview text/);
   assert.match(d, /login page/);
   assert.match(describePage('<title>Post</title><meta property="og:description" content="Best chili &amp; cornbread">'), /preview text "Best chili & cornbread"/);
+});
+
+test('reads recipe-card markup when a page has no structured data', () => {
+  const html = `<html><head><meta property="og:title" content="Easy Banana Muffins | Sally's Kitchen"><meta property="og:image" content="/img/m.jpg"></head><body>
+    <div class="wprm-recipe"><span class="wprm-recipe-servings-container">Servings: 12 muffins</span>
+    <ul class="wprm-recipe-ingredients"><li class="wprm-recipe-ingredient"><span class="wprm-recipe-ingredient-amount">2</span> <span class="wprm-recipe-ingredient-unit">cups</span> <span class="wprm-recipe-ingredient-name">all-purpose flour</span></li>
+    <li class="wprm-recipe-ingredient"><span>3</span> <span>ripe bananas</span>, <span class="wprm-recipe-ingredient-notes">mashed</span></li>
+    <li class="wprm-recipe-ingredient"><span>1</span> <span>tsp</span> <span>baking soda</span></li></ul>
+    <ul class="wprm-recipe-instructions"><li class="wprm-recipe-instruction"><div class="wprm-recipe-instruction-text">Preheat the oven to 350°F.</div></li>
+    <li class="wprm-recipe-instruction"><div class="wprm-recipe-instruction-text">Bake for 20 minutes.</div></li></ul></div></body></html>`;
+  const r = recipeFromMarkup(html, 'https://sally.example/banana-muffins/');
+  assert.equal(r.title, 'Easy Banana Muffins');
+  assert.deepEqual(r.ingredients, ['2 cups all-purpose flour', '3 ripe bananas , mashed', '1 tsp baking soda']);
+  assert.deepEqual(r.instructions, ['Preheat the oven to 350°F.', 'Bake for 20 minutes.']);
+  assert.equal(r.image, 'https://sally.example/img/m.jpg');
+  assert.equal(r.servings, 12);
+  assert.equal(extractRecipeFromHtml(html, 'https://sally.example/x').method, 'markup');
+  assert.equal(recipeFromMarkup('<ul><li class="nav-item">Home</li></ul>'), null);
+});
+
+test('reads a recipe from a page converted to Markdown', () => {
+  const md = `Title: Best Chocolate Chip Cookies
+
+URL Source: https://cookies.example/best
+
+Markdown Content:
+![photo](https://cookies.example/a.jpg)
+Jump to Recipe · Print
+## Ingredients
+* 1 cup **butter**, softened
+* 2 cups [all-purpose flour](https://cookies.example/flour)
+* 1 tsp salt
+### For the topping
+* flaky sea salt
+## Directions
+1. Preheat the oven to 350°F.
+2. Mix everything and bake for 10 minutes.
+## Nutrition Facts
+Calories 200
+## Reviews
+* Loved these!`;
+  const r = parseMarkdownRecipe(md);
+  assert.equal(r.title, 'Best Chocolate Chip Cookies');
+  assert.deepEqual(r.ingredients, ['1 cup butter, softened', '2 cups all-purpose flour', '1 tsp salt', '## For the topping', 'flaky sea salt']);
+  assert.deepEqual(r.instructions, ['Preheat the oven to 350°F.', 'Mix everything and bake for 10 minutes.']);
+  assert.equal(parseMarkdownRecipe('Title: Hi\n\nJust a blog post.'), null);
+});
+
+test('parses web search results and keeps recipe pages', () => {
+  const rss = `<?xml version="1.0"?><rss><channel><title>Bing</title>
+    <item><title>Chicken Alfredo Recipe</title><link>https://www.allrecipes.com/recipe/23431/to-die-for-fettuccine-alfredo/</link><description>Creamy &amp; easy.</description></item>
+    <item><title>Alfredo video</title><link>https://www.youtube.com/watch?v=abc</link><description>x</description></item>
+    <item><title>Best Alfredo</title><link>https://www.budgetbytes.com/chicken-alfredo/</link><description>y</description></item>
+  </channel></rss>`;
+  const r = parseSearchResults(rss);
+  assert.deepEqual(r.map((x) => x.site), ['allrecipes.com', 'budgetbytes.com']);
+  assert.equal(r[0].snippet, 'Creamy & easy.');
+  const ddg = '<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.seriouseats.com%2Ffettuccine-alfredo&amp;rut=1">Fettuccine <b>Alfredo</b></a>';
+  assert.deepEqual(parseSearchResults(ddg), [{ title: 'Fettuccine Alfredo', url: 'https://www.seriouseats.com/fettuccine-alfredo', snippet: '', site: 'seriouseats.com' }]);
+  assert.equal(isLikelyRecipeUrl('https://www.pinterest.com/pin/1'), false);
+  assert.equal(isLikelyRecipeUrl('https://www.allrecipes.com/'), false);
+  assert.equal(isLikelyRecipeUrl('https://site.example/category/dinner/'), false);
 });
 
 function pick(p) {
