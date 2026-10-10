@@ -10,6 +10,11 @@ Forkful is an installable web app (PWA) that copies ReciMe's core features. You 
 | Screenshots of posts | Share a screenshot to the installed app (Android), or pick one under **Scan a screenshot or photo**. Text is read on the device, with dark-mode screenshots inverted first, and social-app clutter ("Liked by…", "View all comments", usernames) is removed before parsing. This works even when a post can't be read from its link. |
 | When a link can't be read | The error screen offers **Use the caption we found** (when part of a caption came through), **Scan a screenshot of the caption**, **Find a matching recipe** and **Paste the caption instead**, plus a **Details** list of every attempt that can be copied for troubleshooting. **Find a matching recipe** searches a free recipe database by dish name and shows photos, so you can pick the one that looks like the post. The original link is kept in the recipe's notes. There's also a Google search button and a box to paste the recipe link you find. Search is also available from the ＋ menu as **Find by dish name**. |
 | Recipe search | **Search recipes** (＋ menu, or from a Discover search) finds pages on cooking websites, loads each one in the background and shows cards with photo, rating and time; one tap saves the full recipe. Classic recipes from TheMealDB show underneath. In Chrome on Android, **Share → Forkful** on any recipe page saves it too. |
+| My Kitchen | Groceries → **My kitchen** keeps what's in the fridge, freezer and pantry. Type items ("2 lb chicken, milk"), tap common staples, or **Put away** checked groceries. Each item gets a guessed location and use-by date (editable), and anything to use soon is flagged. |
+| What can I make? | Ranks your recipes, Forkful's and Discover's (plus recipes looked up by your main ingredients) by how much you already have. It shows what's missing and adds it to the shopping list in one tap. "Assume I have the basics" covers salt, pepper, oil, sugar and spices. |
+| Plan my meals | Suggests 3, 5 or 7 dinners from your kitchen, using food that's about to go off first and not repeating the same protein. It adds them to the meal plan and the missing ingredients to the list. Also on the Plan tab. |
+| Stretch & prep | Use-it-up tips for anything expiring (freeze it, what to cook) and batch-prep projects built from what you have (freezer burritos, soup, fried rice, egg muffins, smoothie packs…) with how long they keep. Save any as a recipe. These are rule-based suggestions. |
+| Discover rows | Rows of real recipes (Crock Pot, Italian, Chicken, Mexican, Air fryer, Pasta, Soups and more) that refresh every week, with a "New picks" button. Most come from TheMealDB; Crock Pot, Air fryer, Soups and One-pan search cooking websites and work best with the import server. |
 | Import from captions & notes | Paste any text. The parser finds the title, servings, times, ingredients, steps and hashtags, even in one-line captions. |
 | Scan recipes from photos | Text is read on the device with Tesseract.js, then parsed the same way as pasted text. |
 | Recipe library & cookbooks | Search across titles, ingredients and tags. Sort by recent, A–Z, quickest or most cooked. Includes favorites and custom cookbooks with emoji covers. |
@@ -75,7 +80,9 @@ forkful/
   js/parse.js           pure parsing/formatting (ingredients, units, captions, schema.org, aisles, nutrition)
   js/store.js           state + localStorage persistence
   js/import.js          link import, OCR, image compression
-  js/samples.js         Discover recipes + starter library
+  js/samples.js         built-in recipes + starter library
+  js/kitchen.js         My Kitchen: storage guesses, use-by dates, recipe matching, plan and prep ideas
+  js/discover.js        Discover rows (weekly picks) and recipes-by-ingredient lookups
   js/app.js             routing, views, cook mode, timers, sheets
   sw.js                 offline cache + Android share target (links, text, screenshots)
   worker/               optional Cloudflare Worker import server

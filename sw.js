@@ -1,10 +1,10 @@
 // Offline support and Android share target.
 // App files load from the network when online (so updates show up right away)
 // and fall back to the saved copy when offline.
-const CACHE = 'forkful-v3';
+const CACHE = 'forkful-v4';
 const SHARE_CACHE = 'forkful-share';
 const SHELL = [
-  './', './index.html', './css/app.css', './js/app.js', './js/parse.js', './js/store.js', './js/samples.js', './js/import.js',
+  './', './index.html', './css/app.css', './js/app.js', './js/parse.js', './js/store.js', './js/samples.js', './js/import.js', './js/kitchen.js', './js/discover.js',
   './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-180.png',
 ];
 

@@ -1,5 +1,6 @@
 // App state persisted to localStorage.
-import { uid, addToGroceryList } from './parse.js';
+import { uid, addToGroceryList, groceryAmount } from './parse.js';
+import { makePantryItem, splitItems, estimateUseBy } from './kitchen.js';
 import { SAMPLE_RECIPES, STARTER_IDS, STARTER_COOKBOOKS } from './samples.js';
 
 const KEY = 'forkful:v1';
@@ -20,7 +21,8 @@ function defaults() {
     cookbooks: STARTER_COOKBOOKS.map(({ sampleIds, ...c }) => c),
     plan: {},
     groceries: [],
-    settings: { name: '', units: 'original', theme: 'system', wakeLock: true, useProxy: true, importServer: '', onboarded: false, groceryGroup: 'aisle' },
+    pantry: [],
+    settings: { name: '', units: 'original', theme: 'system', wakeLock: true, useProxy: true, importServer: '', assumeBasics: true, onboarded: false, groceryGroup: 'aisle' },
   };
 }
 
@@ -198,6 +200,74 @@ export function clearGroceries(onlyChecked) {
   save();
 }
 
+export function addLinesToGroceries(lines, recipe = null) {
+  let list = state.groceries;
+  let added = 0;
+  for (const line of lines) {
+    const before = list;
+    list = addToGroceryList(list, line, { recipeId: recipe?.id || null, recipeTitle: recipe?.title || '' });
+    if (list !== before) added++;
+  }
+  state.groceries = list;
+  save();
+  return added;
+}
+
+// ---------- My Kitchen (pantry, fridge, freezer) ----------
+
+function upsertPantry(item) {
+  const same = state.pantry.find((p) => p.key === item.key && p.location === item.location);
+  if (!same) {
+    state.pantry.push(item);
+    return;
+  }
+  // Bought again: refresh the date and add up amounts when the units agree.
+  if (same.qty != null && item.qty != null && (same.unit || '') === (item.unit || '')) same.qty = Math.round((same.qty + item.qty) * 100) / 100;
+  else if (item.qty != null) Object.assign(same, { qty: item.qty, unit: item.unit, unitText: item.unitText });
+  same.useBy = item.useBy;
+  same.added = item.added;
+}
+
+export function addPantryText(text, location = null) {
+  let n = 0;
+  for (const line of splitItems(text)) {
+    const item = makePantryItem(line, location);
+    if (item) { upsertPantry(item); n++; }
+  }
+  save();
+  return n;
+}
+
+export function updatePantryItem(id, patch) {
+  const it = state.pantry.find((p) => p.id === id);
+  if (!it) return;
+  if (patch.location && patch.location !== it.location && !('useBy' in patch)) patch.useBy = estimateUseBy(it.name, patch.location);
+  Object.assign(it, patch);
+  save();
+}
+
+export function removePantryItem(id) {
+  state.pantry = state.pantry.filter((p) => p.id !== id);
+  save();
+}
+
+export function clearPantry() {
+  state.pantry = [];
+  save();
+}
+
+// Moves checked-off shopping items into the kitchen.
+export function putAwayGroceries() {
+  const bought = state.groceries.filter((g) => g.checked);
+  for (const g of bought) {
+    const item = makePantryItem([groceryAmount(g), g.name].filter(Boolean).join(' '));
+    if (item) upsertPantry(item);
+  }
+  state.groceries = state.groceries.filter((g) => !g.checked);
+  save();
+  return bought.length;
+}
+
 // ---------- Settings & data ----------
 
 export function setSetting(key, value, opts) {
@@ -216,6 +286,7 @@ export function importData(json) {
   state.cookbooks = data.cookbooks || [];
   state.plan = data.plan || {};
   state.groceries = data.groceries || [];
+  state.pantry = data.pantry || [];
   state.settings = { ...state.settings, ...(data.settings || {}) };
   save();
 }

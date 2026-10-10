@@ -1,6 +1,8 @@
 import * as P from './parse.js';
 import * as S from './store.js';
 import { SAMPLE_RECIPES, DISCOVER_CATEGORIES } from './samples.js';
+import * as K from './kitchen.js';
+import * as D from './discover.js';
 import { importFromUrl, searchRecipes, searchWeb, testServer, webSearchUrl, ocrImage, compressImage, ImportError } from './import.js';
 
 const state = S.state;
@@ -11,6 +13,7 @@ const view = $('#view');
 const ui = {
   search: '', sort: 'recent', discoverCat: 'all', discoverSearch: '', detailTab: 'ingredients',
   servings: {}, have: {}, units: null, weekOffset: 0, draft: null,
+  rowData: {}, rowLoading: {}, kitchenLoc: 'auto', makeResults: [], prepIdeas: [],
 };
 
 // ---------- Utilities ----------
@@ -333,7 +336,7 @@ const mountHooks = [];
 const onMount = (f) => mountHooks.push(f);
 
 function updateNav(name) {
-  const tab = { recipes: 'recipes', cookbook: 'recipes', recipe: 'recipes', edit: 'recipes', discover: 'discover', sample: 'discover', plan: 'plan', groceries: 'groceries', profile: 'recipes' }[name];
+  const tab = { recipes: 'recipes', cookbook: 'recipes', recipe: 'recipes', edit: 'recipes', discover: 'discover', sample: 'discover', plan: 'plan', groceries: 'groceries', kitchen: 'groceries', make: 'groceries', stretch: 'groceries', profile: 'recipes' }[name];
   document.querySelectorAll('.tabbar [data-tab]').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
   const count = state.groceries.filter((g) => !g.checked).length;
   const badge = $('#groceryBadge');
@@ -407,6 +410,207 @@ function sortRecipes(list, sort) {
   return l;
 }
 
+// ---------- Kitchen & Discover helpers ----------
+
+function findSample(id) {
+  const sample = SAMPLE_RECIPES.find((x) => x.id === id);
+  if (sample) return sample;
+  const preview = D.findPreview(id);
+  return preview?.ingredients?.length ? preview : null;
+}
+
+function recipeHref(r) {
+  return S.getRecipe(r.id) ? `#/recipe/${r.id}` : `#/sample/${encodeURIComponent(r.id)}`;
+}
+
+// Recipes "What can I make?" and plan suggestions choose from: yours, Forkful's and Discover's.
+function kitchenCandidates() {
+  const mine = state.recipes;
+  const titles = new Set(mine.map((r) => r.title.toLowerCase()));
+  const others = [...SAMPLE_RECIPES, ...D.cachedRecipes(), ...D.cachedMeals()]
+    .filter((r) => !titles.has(r.title.toLowerCase()) && !mine.some((x) => x.sampleId === r.id));
+  return [...mine, ...others];
+}
+
+// Looks up more recipes that use the main things in the kitchen (once per session per item),
+// then calls `done` so the screen can refresh.
+const lookedUp = new Set();
+function fetchKitchenRecipes(done) {
+  const soon = K.useSoon(state.pantry, { within: 5 }).map((it) => it.name);
+  const proteins = state.pantry.filter((it) => P.categorize(it.name) === 'Meat & Seafood').map((it) => it.name);
+  const produce = state.pantry.filter((it) => P.categorize(it.name) === 'Produce').map((it) => it.name);
+  const names = [...new Set([...proteins, ...soon, ...produce])].filter((n) => !lookedUp.has(n)).slice(0, 4);
+  if (!names.length) return false;
+  names.forEach((n) => lookedUp.add(n));
+  D.mealsUsing(names).then((found) => { if (found.length) done(); }).catch(() => {});
+  return true;
+}
+
+function groceryModeSeg(mode) {
+  return `<div class="seg mode-seg"><a class="${mode === 'list' ? 'on' : ''}" href="#/groceries">${icon('cart')} Shopping list</a><a class="${mode === 'kitchen' ? 'on' : ''}" href="#/kitchen">${icon('home')} My kitchen</a></div>`;
+}
+
+function useBadge(it) {
+  const d = K.daysLeft(it.useBy);
+  if (d == null) return '';
+  const cls = d <= 1 ? 'bad' : d <= 3 ? 'warn' : '';
+  const txt = d < 0 ? 'past date' : d === 0 ? 'use today' : d === 1 ? '1 day' : d < 14 ? `${d} days` : `${Math.round(d / 7)} wks`;
+  return `<span class="use-badge ${cls}">${txt}</span>`;
+}
+
+function kitchenRow(it) {
+  const amount = P.groceryAmount(it);
+  return `<li class="kitem"><button class="ktext" data-action="kitchen-item" data-id="${it.id}"><span>${amount ? `<b>${esc(amount)}</b> ` : ''}${esc(it.name)}</span>${useBadge(it)}</button>
+    <button class="icon-btn sm ghost" data-action="kitchen-remove" data-id="${it.id}" aria-label="Used up ${esc(it.name)}">${icon('check')}</button></li>`;
+}
+
+function rowCards(row) {
+  const items = ui.rowData[row.id];
+  if (!items) return Array.from({ length: 4 }, () => '<div class="dcard"><div class="thumb skeleton"></div><span class="dline"></span></div>').join('');
+  if (!items.length) {
+    return `<p class="muted small drow-empty">${row.web && !state.settings.importServer ? 'Couldn\'t reach cooking websites right now. Setting up your import server (Profile) fixes this.' : 'Nothing to show right now. Tap “New picks” to try again.'}</p>`;
+  }
+  return items.map((r) => {
+    const t = totalTime(r);
+    const saved = state.recipes.some((x) => x.sampleId === r.id);
+    const meta = [r.sourceRating ? `★ ${r.sourceRating}` : '', t ? P.formatMinutes(t) : '', r.source?.url && !r.mealdbId ? P.hostFromUrl(r.source.url) : ''].filter(Boolean).join(' · ');
+    return `<button class="dcard" data-action="open-preview" data-id="${esc(r.id)}">${thumb(r)}${saved ? `<span class="saved-dot">${icon('check')}</span>` : ''}
+      <strong>${esc(r.title)}</strong>${meta ? `<small>${esc(meta)}</small>` : ''}</button>`;
+  }).join('');
+}
+
+let rowObserver = null;
+function mountDiscoverRows() {
+  rowObserver?.disconnect();
+  const load = (row) => {
+    if (ui.rowData[row.id] || ui.rowLoading[row.id]) return;
+    ui.rowLoading[row.id] = true;
+    const paint = () => {
+      const el = document.querySelector(`.drow[data-row="${row.id}"] .drow-items`);
+      if (el) el.innerHTML = rowCards(row);
+    };
+    D.loadRow(row, {
+      useProxy: state.settings.useProxy !== false,
+      server: state.settings.importServer || '',
+      onUpdate: (items) => { if (items.length) { ui.rowData[row.id] = items; paint(); } },
+    }).then((items) => { ui.rowData[row.id] = items; paint(); })
+      .catch(() => { ui.rowData[row.id] = []; paint(); })
+      .finally(() => { ui.rowLoading[row.id] = false; });
+  };
+  const rows = Object.fromEntries(D.ROWS.map((r) => [r.id, r]));
+  if (!('IntersectionObserver' in window)) { D.ROWS.forEach(load); return; }
+  rowObserver = new IntersectionObserver((entries) => {
+    entries.forEach((e) => { if (e.isIntersecting) { load(rows[e.target.dataset.row]); rowObserver.unobserve(e.target); } });
+  }, { rootMargin: '300px' });
+  document.querySelectorAll('.drow').forEach((el) => { if (!ui.rowData[el.dataset.row]) rowObserver.observe(el); });
+}
+
+function kitchenItemSheet(id) {
+  const it = state.pantry.find((x) => x.id === id);
+  if (!it) return;
+  let loc = it.location;
+  let dateTouched = false;
+  const s = openSheet(`
+    <h2 class="sheet-title">${esc(it.name)}</h2>
+    <form id="kiForm" class="stack">
+      <label class="field"><span>Amount</span><input id="kiAmt" value="${esc(P.groceryAmount(it))}" placeholder="e.g. 2 lb" autocomplete="off"></label>
+      <div class="field"><span>Where it is</span><div class="seg" id="kiLoc">${K.LOCATIONS.map((l) => `<button type="button" class="${l.id === loc ? 'on' : ''}" data-loc="${l.id}">${l.emoji} ${l.label.split(' ')[0]}</button>`).join('')}</div></div>
+      <label class="field"><span>Use by <small>our estimate — change it to match the package</small></span><input id="kiDate" type="date" value="${esc(it.useBy || '')}"></label>
+      <div class="sheet-actions"><button type="button" class="btn ghost" id="kiUsed">${icon('check')} Used it up</button><button class="btn primary">Save</button></div>
+    </form>`);
+  const date = s.el.querySelector('#kiDate');
+  date.oninput = () => { dateTouched = true; };
+  s.el.querySelectorAll('[data-loc]').forEach((b) => {
+    b.onclick = () => {
+      loc = b.dataset.loc;
+      s.el.querySelectorAll('[data-loc]').forEach((x) => x.classList.toggle('on', x === b));
+      if (!dateTouched) date.value = K.estimateUseBy(it.name, loc) || '';
+    };
+  });
+  s.el.querySelector('#kiUsed').onclick = () => { s.close(); removeKitchenItem(id); };
+  s.el.querySelector('#kiForm').onsubmit = (e) => {
+    e.preventDefault();
+    const amt = s.el.querySelector('#kiAmt').value.trim();
+    const p = amt ? P.parseIngredient(`${amt} ${it.name}`) : { qty: null, unit: null, unitText: '' };
+    S.updatePantryItem(id, { qty: p.qty, unit: p.unit, unitText: p.unitText, location: loc, useBy: date.value || null });
+    s.close();
+  };
+}
+
+function removeKitchenItem(id) {
+  const it = state.pantry.find((x) => x.id === id);
+  if (!it) return;
+  S.removePantryItem(id);
+  toast(`Removed ${it.name}`, { action: 'Undo', onAction: () => { state.pantry.push(it); S.save(); } });
+}
+
+function staplesSheet() {
+  const have = new Set(state.pantry.map((p) => p.key));
+  const picked = new Set();
+  const s = openSheet('', { className: 'tall' });
+  const draw = () => {
+    s.set(`<h2 class="sheet-title">Quick-add staples</h2>
+      <p class="muted small">Tap what you have. You can change amounts and dates later.</p>
+      ${Object.entries(K.STAPLES).map(([group, names]) => `<h3 class="results-head">${group}</h3><div class="chips wrap">${names.map((n) => {
+        const key = P.normalizeName(n);
+        const owned = have.has(key);
+        return `<button type="button" class="chip ${picked.has(n) || owned ? 'on' : ''}" data-n="${esc(n)}" data-g="${group}" ${owned ? 'disabled' : ''}>${esc(n)}</button>`;
+      }).join('')}</div>`).join('')}
+      <button class="btn primary full staples-go" id="stGo" ${picked.size ? '' : 'disabled'}>Add ${picked.size || ''} item${picked.size === 1 ? '' : 's'}</button>`);
+    s.el.querySelectorAll('[data-n]').forEach((b) => {
+      b.onclick = () => { const n = b.dataset.n; if (picked.has(n)) picked.delete(n); else picked.add(n); draw(); };
+    });
+    s.el.querySelector('#stGo').onclick = () => {
+      const loc = { Pantry: 'pantry', Fridge: 'fridge', Freezer: 'freezer' };
+      Object.entries(K.STAPLES).forEach(([group, names]) => {
+        const chosen = names.filter((n) => picked.has(n));
+        if (chosen.length) S.addPantryText(chosen.join('\n'), loc[group]);
+      });
+      s.close();
+      toast(`Added ${picked.size} item${picked.size === 1 ? '' : 's'} to your kitchen`);
+    };
+  };
+  draw();
+}
+
+function kitchenPlanSheet() {
+  if (!state.pantry.length) {
+    toast('Add what you have in My Kitchen first');
+    go('#/kitchen');
+    return;
+  }
+  let days = 5;
+  const s = openSheet('', { className: 'tall' });
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dayLabel = (i) => (i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : fmtDay(addDays(today, i), { weekday: 'short' }));
+  let searching = fetchKitchenRecipes(() => { searching = false; if (s.el.isConnected) draw(); });
+  const draw = () => {
+    const picks = K.suggestPlan(kitchenCandidates(), state.pantry, { days, assumeBasics: state.settings.assumeBasics !== false });
+    s.set(`<h2 class="sheet-title">Meals from your kitchen</h2>
+      <p class="muted small">Dinners that use what you have, starting with food that needs using soon.</p>
+      <div class="seg">${[3, 5, 7].map((n) => `<button class="${n === days ? 'on' : ''}" data-days="${n}">${n} days</button>`).join('')}</div>
+      ${picks.length ? `<ol class="kplan">${picks.map((m, i) => `<li><span class="kday">${dayLabel(i)}</span>${thumb(m.recipe, 'mini')}<div><strong>${esc(m.recipe.title)}</strong>
+        <small>${m.missing.length ? `Missing ${m.missing.length}: ${esc(m.missing.map((l) => P.parseIngredient(l).name).join(', '))}` : 'You have everything'}${m.usesSoon ? ' · uses food to use soon' : ''}</small></div></li>`).join('')}</ol>
+        ${picks.some((m) => m.missing.length) ? '<label class="check-row"><input type="checkbox" id="kpMissing" checked> Add the missing ingredients to my shopping list</label>' : ''}
+        <button class="btn primary full" id="kpGo">${icon('calendar')} Add to meal plan</button>`
+        : searching ? '<div class="loading center-load"><span class="spinner"></span> Looking for recipes that use what you have…</div>'
+          : emptyState('🧺', 'No dinner matches yet', 'Add more of what you have (especially meat, fish or veg), or save a few dinner recipes, and try again.')}`);
+    s.el.querySelectorAll('[data-days]').forEach((b) => { b.onclick = () => { days = +b.dataset.days; draw(); }; });
+    s.el.querySelector('#kpGo')?.addEventListener('click', () => {
+      const addMissing = s.el.querySelector('#kpMissing')?.checked;
+      picks.forEach((m, i) => {
+        const r = S.getRecipe(m.recipe.id) || S.saveSample(m.recipe);
+        S.planAdd(ymd(addDays(today, i)), { recipeId: r.id, meal: 'dinner', servings: r.servings });
+        if (addMissing && m.missing.length) S.addLinesToGroceries(m.missing, r);
+      });
+      s.close();
+      toast(`Planned ${picks.length} dinners`, { action: 'View', onAction: () => go('#/plan') });
+    });
+  };
+  draw();
+}
+
 // ---------- Views ----------
 
 const VIEWS = {
@@ -465,11 +669,16 @@ const VIEWS = {
   },
 
   sample(id) {
-    const r = SAMPLE_RECIPES.find((x) => x.id === id);
-    if (!r) return notFound();
     const saved = state.recipes.find((x) => x.sampleId === id);
     if (saved) return detail(saved, { sample: false });
-    return detail(r, { sample: true });
+    const r = findSample(id);
+    if (r) return detail(r, { sample: true });
+    const stub = D.findPreview(id);
+    if (!stub) return notFound();
+    D.fullPreview(id)
+      .then(() => { if (route().name === 'sample') render(); })
+      .catch(() => toast('Couldn\'t load that recipe — check your connection'));
+    return `${topbar(esc(stub.title), { back: '#/discover' })}<div class="loading center-load"><span class="spinner"></span> Loading recipe…</div>`;
   },
 
   discover() {
@@ -478,23 +687,144 @@ const VIEWS = {
       || (ui.discoverCat === 'quick' ? totalTime(r) > 0 && totalTime(r) <= 30 : r.categories.includes(ui.discoverCat));
     let list = SAMPLE_RECIPES.filter(inCategory);
     list = filterRecipes(list, q);
-    const featured = !q && ui.discoverCat === 'all' ? SAMPLE_RECIPES[new Date().getDate() % SAMPLE_RECIPES.length] : null;
+    const featured = !q ? SAMPLE_RECIPES[new Date().getDate() % SAMPLE_RECIPES.length] : null;
+    const samples = `
+      <section>
+        <div class="section-head"><h2>From the Forkful kitchen</h2></div>
+        <div class="chips scroll">${DISCOVER_CATEGORIES.map((c) => `<button class="chip ${ui.discoverCat === c.id ? 'on' : ''}" data-action="discover-cat" data-cat="${c.id}">${c.label}</button>`).join('')}</div>
+        ${list.length ? `<div class="grid">${list.map((r) => recipeCard(r, { sample: true })).join('')}</div>` : emptyState('🥄', 'No ideas found', 'Try another category.')}
+      </section>`;
+    if (q) {
+      return `
+        ${topbar('Discover', { eyebrow: 'New picks every week' })}
+        <label class="search">${icon('search')}<input id="dsearch" type="search" data-input="discoverSearch" placeholder="Search ideas…" value="${esc(q)}" autocomplete="off"></label>
+        <button class="btn soft full web-search-btn" data-action="web-search" data-q="${esc(q)}">${icon('search')} Search recipe websites for “${esc(q)}”</button>
+        ${list.length ? `<div class="grid">${list.map((r) => recipeCard(r, { sample: true })).join('')}</div>` : ''}`;
+    }
+    onMount(mountDiscoverRows);
     return `
-      ${topbar('Discover', { eyebrow: 'Fresh ideas for your next meal' })}
+      ${topbar('Discover', { eyebrow: 'New picks every week' })}
       <label class="search">${icon('search')}<input id="dsearch" type="search" data-input="discoverSearch" placeholder="Search ideas…" value="${esc(q)}" autocomplete="off"></label>
-      ${featured ? `
-        <a class="feature" href="#/sample/${featured.id}">
-          ${thumb(featured, 'feature-img')}
-          <div class="feature-body"><span class="kicker">${icon('sparkle')} Recipe of the day</span><h2>${esc(featured.title)}</h2><p>${esc(featured.description)}</p>
-          <span class="meta">${icon('clock')} ${P.formatMinutes(totalTime(featured))} · ${featured.servings} servings</span></div>
-        </a>
-        <div class="promo">
-          <div><h3>Save recipes from anywhere</h3><p>Share a Reel, TikTok, YouTube video or blog post to Forkful and we'll pull out the ingredients and steps for you.</p></div>
-          <button class="btn primary sm" data-action="import">${icon('link')} Import</button>
-        </div>` : ''}
-      <div class="chips scroll">${DISCOVER_CATEGORIES.map((c) => `<button class="chip ${ui.discoverCat === c.id ? 'on' : ''}" data-action="discover-cat" data-cat="${c.id}">${c.label}</button>`).join('')}</div>
-      ${q ? `<button class="btn soft full web-search-btn" data-action="web-search" data-q="${esc(q)}">${icon('search')} Search recipe websites for “${esc(q)}”</button>` : ''}
-      ${list.length ? `<div class="grid">${list.map((r) => recipeCard(r, { sample: true })).join('')}</div>` : q ? '' : emptyState('🥄', 'No ideas found', 'Try another category.')}`;
+      <a class="feature" href="#/sample/${featured.id}">
+        ${thumb(featured, 'feature-img')}
+        <div class="feature-body"><span class="kicker">${icon('sparkle')} Recipe of the day</span><h2>${esc(featured.title)}</h2><p>${esc(featured.description)}</p>
+        <span class="meta">${icon('clock')} ${P.formatMinutes(totalTime(featured))} · ${featured.servings} servings</span></div>
+      </a>
+      <div class="section-head"><h2>Browse by category</h2><button class="link-btn" data-action="discover-refresh">↻ New picks</button></div>
+      ${D.ROWS.map((row) => `<section class="drow" data-row="${row.id}">
+        <h3 class="drow-title">${row.emoji} ${esc(row.title)}</h3>
+        <div class="hscroll drow-items">${rowCards(row)}</div>
+      </section>`).join('')}
+      <div class="promo">
+        <div><h3>Save recipes from anywhere</h3><p>Share a Reel, TikTok, YouTube video or blog post to Forkful and we'll pull out the ingredients and steps for you.</p></div>
+        <button class="btn primary sm" data-action="import">${icon('link')} Import</button>
+      </div>
+      ${samples}`;
+  },
+
+  kitchen() {
+    const items = state.pantry;
+    const soon = K.useSoon(items);
+    const checked = state.groceries.filter((g) => g.checked).length;
+    const byLoc = (loc) => items.filter((it) => it.location === loc)
+      .sort((a, b) => (K.daysLeft(a.useBy) ?? 9999) - (K.daysLeft(b.useBy) ?? 9999) || a.name.localeCompare(b.name));
+    const locSeg = [['auto', 'Auto'], ...K.LOCATIONS.map((l) => [l.id, l.label.split(' ')[0]])]
+      .map(([v, l]) => `<button type="button" class="${ui.kitchenLoc === v ? 'on' : ''}" data-action="kitchen-loc" data-loc="${v}">${l}</button>`).join('');
+    return `
+      ${topbar('My Kitchen', { eyebrow: items.length ? `${items.length} item${items.length === 1 ? '' : 's'}${soon.length ? ` · ${soon.length} to use soon` : ''}` : 'What you have at home', right: `<button class="icon-btn" data-action="kitchen-menu" aria-label="Kitchen options">${icon('more')}</button>` })}
+      ${groceryModeSeg('kitchen')}
+      <form class="add-bar" data-submit="kitchen-add">
+        <input id="kadd" placeholder="Add what you have: 2 lb chicken, milk, eggs" autocomplete="off" enterkeyhint="done">
+        <button class="btn primary sm" aria-label="Add">${icon('plus')}</button>
+      </form>
+      <div class="seg sm kloc">${locSeg}</div>
+      ${items.length ? `
+        <div class="kitchen-actions">
+          <a class="kaction" href="#/make"><span>🍳</span><strong>What can I make?</strong><small>Recipes from what you have</small></a>
+          <button class="kaction" data-action="kitchen-plan"><span>📅</span><strong>Plan my meals</strong><small>A few days from your kitchen</small></button>
+          <a class="kaction" href="#/stretch"><span>🫙</span><strong>Stretch & prep</strong><small>${soon.length ? `${soon.length} to use soon` : 'Make food last longer'}</small></a>
+        </div>
+        ${soon.length ? `<section class="ggroup soon-group"><h3>⏰ Use soon <span>${soon.length}</span></h3><ul>${soon.map(kitchenRow).join('')}</ul></section>` : ''}
+        ${K.LOCATIONS.map((l) => { const list = byLoc(l.id); return list.length ? `<section class="ggroup"><h3>${l.emoji} ${l.label} <span>${list.length}</span></h3><ul>${list.map(kitchenRow).join('')}</ul></section>` : ''; }).join('')}`
+        : emptyState('🧺', 'What\'s in your kitchen?', 'Add what you have and Forkful will suggest meals, prep projects and ways to make food last.',
+          `<div class="stack center-stack"><button class="btn primary" data-action="kitchen-staples">${icon('plus')} Quick-add staples</button>
+          ${checked ? `<button class="btn soft" data-action="put-away">${icon('cart')} Put away ${checked} checked groceries</button>` : ''}</div>`)}`;
+  },
+
+  make() {
+    if (!state.pantry.length) {
+      return `${topbar('What can I make?', { back: '#/kitchen' })}${emptyState('🧺', 'Add what you have first', 'Tell Forkful what\'s in your fridge, freezer and pantry and it will find recipes you can make.', '<a class="btn primary" href="#/kitchen">Go to My Kitchen</a>')}`;
+    }
+    const assumeBasics = state.settings.assumeBasics !== false;
+    const searching = fetchKitchenRecipes(() => { if (route().name === 'make') render(); });
+    const results = K.whatCanIMake(kitchenCandidates(), state.pantry, { assumeBasics, maxMissing: 5, minScore: 0.3 });
+    ui.makeResults = results;
+    const card = (m, i) => {
+      const r = m.recipe;
+      const missingNames = m.missing.map((l) => P.parseIngredient(l).name);
+      return `<div class="mcard">
+        <a class="mlink" href="${recipeHref(r)}">${thumb(r, 'mini')}<div class="mtext"><strong>${esc(r.title)}</strong>
+          <small>Have ${m.have.length} of ${m.total}${m.usesSoon ? ' · uses food to use soon' : ''}</small>
+          <div class="mbar"><div class="p" style="width:${Math.round(m.score * 100)}%"></div></div></div></a>
+        ${m.missing.length ? `<p class="missing">Missing: ${esc(missingNames.join(', '))}</p>
+          <button class="btn soft sm" data-action="add-missing" data-i="${i}">${icon('cart')} Add ${m.missing.length} to shopping list</button>` : '<p class="ready">✓ You have everything</p>'}
+      </div>`;
+    };
+    const groups = [
+      ['✅ Ready to cook', results.map((m, i) => [m, i]).filter(([m]) => !m.missing.length)],
+      ['🛒 Missing 1–2 things', results.map((m, i) => [m, i]).filter(([m]) => m.missing.length >= 1 && m.missing.length <= 2)],
+      ['📝 Missing a few', results.map((m, i) => [m, i]).filter(([m]) => m.missing.length > 2)],
+    ];
+    const main = K.useSoon(state.pantry, { within: 5 }).map((it) => it.name);
+    state.pantry.filter((it) => P.categorize(it.name) === 'Meat & Seafood').forEach((it) => main.push(it.name));
+    state.pantry.forEach((it) => main.push(it.name));
+    const ideas = [...new Set(main)].slice(0, 4);
+    return `
+      ${topbar('What can I make?', { back: '#/kitchen', eyebrow: `Using the ${state.pantry.length} things in your kitchen` })}
+      ${searching ? '<div class="loading small-load"><span class="spinner"></span> Looking for more recipes that use what you have…</div>' : ''}
+      <div class="setting basics"><div><strong>Assume I have the basics</strong><small>Salt, pepper, oil, sugar, spices and baking soda/powder</small></div>
+        <button class="switch ${assumeBasics ? 'on' : ''}" role="switch" aria-checked="${assumeBasics}" data-action="toggle-basics"><span></span></button></div>
+      ${results.length ? groups.filter(([, l]) => l.length).map(([h, l]) => `<section><div class="section-head"><h2>${h}</h2></div>${l.map(([m, i]) => card(m, i)).join('')}</section>`).join('')
+        : emptyState('🤔', 'No close matches yet', 'Save a few more recipes, add more of what you have, or search online below.')}
+      <section class="find-more">
+        <div class="section-head"><h2>🔎 Find more online</h2></div>
+        <p class="muted small">Search cooking websites for recipes using:</p>
+        <div class="chips wrap">${ideas.map((n) => `<button class="chip" data-action="web-search" data-q="${esc(n)}">${esc(n)}</button>`).join('')}
+          ${ideas.length > 1 ? `<button class="chip on" data-action="web-search" data-q="${esc(ideas.slice(0, 2).join(' '))}">${esc(ideas.slice(0, 2).join(' + '))}</button>` : ''}</div>
+      </section>`;
+  },
+
+  stretch() {
+    if (!state.pantry.length) {
+      return `${topbar('Stretch & prep', { back: '#/kitchen' })}${emptyState('🫙', 'Add what you have first', 'Tips and prep projects are built from what\'s in your kitchen.', '<a class="btn primary" href="#/kitchen">Go to My Kitchen</a>')}`;
+    }
+    const soon = K.useSoon(state.pantry, { within: 4 });
+    const ideas = K.prepIdeas(state.pantry);
+    ui.prepIdeas = ideas;
+    const soonIds = new Set(soon.map((it) => it.id));
+    return `
+      ${topbar('Stretch & prep', { back: '#/kitchen', eyebrow: 'Waste less, make it last' })}
+      <section>
+        <div class="section-head"><h2>⏰ Use it up</h2></div>
+        ${soon.length ? soon.map((it) => {
+          const tip = K.useItUpTip(it.name);
+          return `<div class="tipcard"><div class="tiphead"><strong>${esc(it.name)}</strong>${useBadge(it)}</div><p>${esc(tip.tip)}</p>
+            <div class="tipbtns"><button class="btn soft sm" data-action="web-search" data-q="${esc(tip.search)}">${icon('search')} Find recipes</button>
+            ${it.location !== 'freezer' ? `<button class="btn ghost sm" data-action="kitchen-freeze" data-id="${it.id}">❄️ Freeze it</button>` : ''}
+            <button class="btn ghost sm" data-action="kitchen-remove" data-id="${it.id}">${icon('check')} Used it</button></div></div>`;
+        }).join('') : '<div class="all-good">✓ Nothing needs using up right now.</div>'}
+      </section>
+      <section>
+        <div class="section-head"><h2>🥡 Prep projects</h2></div>
+        ${ideas.length ? ideas.map((idea, i) => {
+          const p = idea.project;
+          return `<div class="prepcard"><div class="prephead"><span class="prep-emoji">${p.emoji}</span><div><strong>${esc(p.title)}</strong><small>${esc(p.makes)} · ${esc(p.keeps)}</small></div></div>
+            <p>${esc(p.why)}</p>
+            <div class="uses">${idea.uses.map((u) => `<span class="${soonIds.has(u.id) ? 'soon' : ''}">${esc(u.name)}</span>`).join('')}</div>
+            <details><summary>How to do it</summary><ol>${p.steps.map((st) => `<li>${esc(st)}</li>`).join('')}</ol></details>
+            <button class="btn soft sm" data-action="save-project" data-i="${i}">${icon('bookmark')} Save as recipe</button></div>`;
+        }).join('') : '<p class="muted">Add a few more things to your kitchen and prep ideas will show up here.</p>'}
+      </section>`;
   },
 
   edit(id) {
@@ -540,6 +870,7 @@ const VIEWS = {
         <div><strong>${range}</strong>${ui.weekOffset ? `<button class="link-btn" data-action="week" data-d="0">Back to this week</button>` : '<span class="muted">This week</span>'}</div>
         <button class="icon-btn" data-action="week" data-d="1" aria-label="Next week">${icon('fwd')}</button>
       </div>
+      <button class="btn soft full" data-action="kitchen-plan">🧺 Suggest meals from my kitchen</button>
       ${recipeCount ? `<button class="btn soft full" data-action="plan-to-groceries">${icon('cart')} Add ${recipeCount} recipe${recipeCount === 1 ? '' : 's'} to grocery list</button>` : ''}
       <div class="days">${dayCards}</div>`;
   },
@@ -566,6 +897,7 @@ const VIEWS = {
     const pct = items.length ? Math.round((done.length / items.length) * 100) : 0;
     return `
       ${topbar('Groceries', { eyebrow: items.length ? `${open.length} to buy · ${done.length} in cart` : 'Your shopping list', right: items.length ? `<button class="icon-btn" data-action="grocery-menu" aria-label="List options">${icon('more')}</button>` : '' })}
+      ${groceryModeSeg('list')}
       <form class="add-bar" data-submit="grocery-add">
         <input id="gadd" placeholder="Add an item, e.g. 2 lemons" autocomplete="off" enterkeyhint="done">
         <button class="btn primary sm" aria-label="Add item">${icon('plus')}</button>
@@ -575,7 +907,7 @@ const VIEWS = {
         <div class="seg sm"><button class="${!byRecipe ? 'on' : ''}" data-action="grocery-group" data-g="aisle">By aisle</button><button class="${byRecipe ? 'on' : ''}" data-action="grocery-group" data-g="recipe">By recipe</button></div>
         ${order.map((k) => `<section class="ggroup"><h3>${byRecipe ? '🍽️' : P.AISLE_EMOJI[k] || '🛒'} ${esc(k)} <span>${groups.get(k).length}</span></h3><ul>${groups.get(k).map(row).join('')}</ul></section>`).join('')}
         ${!open.length ? `<div class="all-done">🎉 All done! Everything's in the cart.</div>` : ''}
-        ${done.length ? `<section class="ggroup done-group"><h3>✅ In cart <span>${done.length}</span><button class="link-btn" data-action="grocery-clear-checked">Clear</button></h3><ul>${done.map(row).join('')}</ul></section>` : ''}`
+        ${done.length ? `<section class="ggroup done-group"><h3>✅ In cart <span>${done.length}</span><button class="link-btn" data-action="put-away">Put away</button><button class="link-btn" data-action="grocery-clear-checked">Clear</button></h3><ul>${done.map(row).join('')}</ul></section>` : ''}`
         : emptyState('🛒', 'Your list is empty', 'Add ingredients from any recipe or your meal plan. Matching items are combined automatically.', `<a class="btn soft" href="#/plan">${icon('calendar')} Open meal plan</a>`)}`;
   },
 
@@ -1475,6 +1807,49 @@ const actions = {
   },
   import() { importSheet(); },
   'web-search'(el) { importSheet('search', { query: el.dataset.q }); },
+  'open-preview'(el) { go(`#/sample/${encodeURIComponent(el.dataset.id)}`); },
+  'discover-refresh'() {
+    D.clearDiscoverCache();
+    ui.rowData = {};
+    ui.rowLoading = {};
+    render();
+    toast('Finding new picks…');
+  },
+  'put-away'() {
+    const n = S.putAwayGroceries();
+    toast(`Put away ${n} item${n === 1 ? '' : 's'} in your kitchen`, { action: 'View', onAction: () => go('#/kitchen') });
+  },
+  'kitchen-loc'(el) { ui.kitchenLoc = el.dataset.loc; render(); },
+  'kitchen-item'(el) { kitchenItemSheet(el.dataset.id); },
+  'kitchen-remove'(el) { removeKitchenItem(el.dataset.id); },
+  'kitchen-freeze'(el) {
+    S.updatePantryItem(el.dataset.id, { location: 'freezer' });
+    toast('Moved to the freezer — it\'ll keep much longer');
+  },
+  'kitchen-staples'() { staplesSheet(); },
+  'kitchen-plan'() { kitchenPlanSheet(); },
+  'kitchen-menu'() {
+    const checked = state.groceries.filter((g) => g.checked).length;
+    menuSheet([
+      { icon: 'plus', label: 'Quick-add staples', run: () => staplesSheet() },
+      ...(checked ? [{ icon: 'cart', label: `Put away ${checked} checked groceries`, run: () => actions['put-away']() }] : []),
+      { icon: 'trash', label: 'Clear my kitchen', danger: true, run: async () => { if (await confirmSheet('Clear your kitchen?', 'Everything in My Kitchen will be removed.', { confirm: 'Clear' })) S.clearPantry(); } },
+    ]);
+  },
+  'toggle-basics'() { S.setSetting('assumeBasics', state.settings.assumeBasics === false); },
+  'add-missing'(el) {
+    const m = ui.makeResults[+el.dataset.i];
+    if (!m) return;
+    const n = S.addLinesToGroceries(m.missing, { id: m.recipe.id, title: m.recipe.title });
+    toast(`Added ${n} item${n === 1 ? '' : 's'} to your shopping list`, { action: 'View', onAction: () => go('#/groceries') });
+  },
+  'save-project'(el) {
+    const idea = ui.prepIdeas[+el.dataset.i];
+    if (!idea) return;
+    const saved = S.saveRecipe({ ...S.emptyRecipe(), ...K.projectToRecipe(idea) });
+    go(`#/recipe/${saved.id}`);
+    toast('Saved to your recipes');
+  },
   async 'test-server'() {
     const input = $('#importServer');
     const status = $('#serverStatus');
@@ -1507,7 +1882,7 @@ const actions = {
     toast(r.favorite ? 'Added to Favorites ❤️' : 'Removed from Favorites');
   },
   'save-sample'(el) {
-    const sample = SAMPLE_RECIPES.find((x) => x.id === el.dataset.id);
+    const sample = findSample(el.dataset.id);
     const existing = state.recipes.find((x) => x.sampleId === el.dataset.id);
     if (existing) {
       if (el.dataset.open) go(`#/recipe/${existing.id}`);
@@ -1547,7 +1922,7 @@ const actions = {
   },
   'detail-tab'(el) { ui.detailTab = el.dataset.tab; render(); },
   serv(el) {
-    const r = S.getRecipe(el.dataset.key) || SAMPLE_RECIPES.find((x) => x.id === el.dataset.key);
+    const r = S.getRecipe(el.dataset.key) || findSample(el.dataset.key);
     const cur = ui.servings[el.dataset.key] ?? r.servings ?? 1;
     ui.servings[el.dataset.key] = Math.max(1, Math.min(99, cur + +el.dataset.d));
     render();
@@ -1588,7 +1963,7 @@ const actions = {
     }
   },
   share(el) {
-    const r = el.dataset.sample ? SAMPLE_RECIPES.find((x) => x.id === el.dataset.id) : S.getRecipe(el.dataset.id);
+    const r = el.dataset.sample ? findSample(el.dataset.id) : S.getRecipe(el.dataset.id);
     shareOrCopy(r.title, shareText(r));
   },
   rate(el) {
@@ -1605,7 +1980,7 @@ const actions = {
     toast('Nice! Logged another cook 👩‍🍳');
   },
   cook(el) {
-    const r = el.dataset.sample ? SAMPLE_RECIPES.find((x) => x.id === el.dataset.id) : S.getRecipe(el.dataset.id);
+    const r = el.dataset.sample ? findSample(el.dataset.id) : S.getRecipe(el.dataset.id);
     const serv = ui.servings[r.id] ?? r.servings ?? 1;
     openCook(r, serv / (r.servings || 1));
   },
@@ -1778,6 +2153,13 @@ document.addEventListener('submit', (e) => {
     if (!v) return;
     v.split(/\s*,\s*(?=\d)|\n/).forEach((t) => S.addGroceryText(t));
     $('#gadd')?.focus();
+  } else if (kind === 'kitchen-add') {
+    const input = form.querySelector('input');
+    const v = input.value.trim();
+    if (!v) return;
+    const n = S.addPantryText(v, ui.kitchenLoc === 'auto' ? null : ui.kitchenLoc);
+    toast(`Added ${n} item${n === 1 ? '' : 's'}`);
+    $('#kadd')?.focus();
   } else if (kind === 'save-recipe') {
     const id = form.dataset.id;
     const base = id ? S.getRecipe(id) : ui.draft || S.emptyRecipe();
